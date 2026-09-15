@@ -14,20 +14,7 @@
     <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=600&size=22&duration=3000&pause=1000&color=FF69B4&center=true&vCenter=true&width=600&lines=Competitive+Programmer;Embedded+Systems+Enthusiast;Software+%26+App+Developer;Turning+Complex+Algorithms+Into+Code+%E2%9C%A8" alt="Typing SVG" />
   </a>
 
-  <br><br>
-
-  <!-- Pink Badges -->
-  <a href="https://github.com/YOUR_USERNAME">
-    <img src="https://img.shields.io/github/followers/YOUR_USERNAME?label=Followers&logo=github&style=for-the-badge&color=EF93C4&labelColor=30343f" alt="Followers" />
-  </a>
-  <a href="https://github.com/YOUR_USERNAME">
-    <img src="https://img.shields.io/badge/Total%20Stars-YOUR_STARS-EF93C4?style=for-the-badge&logo=apachespark&logoColor=white&labelColor=30343f" alt="Stars" />
-  </a>
-  <img src="https://komarev.com/ghpvc/?username=YOUR_USERNAME&label=Profile%20Views&color=ef93c4&style=for-the-badge" alt="Profile Views" />
-
-</div>
-
-<br>
+  <br>
 
 ---
 
