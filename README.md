@@ -16,9 +16,9 @@
   </a>
   <br><br>
 
-  <!-- Animated Typing SVG -->
+  <!-- Animated Typing SVG (Sped up: duration=1500, pause=500) -->
   <a href="https://github.com/OmReddyEnduri">
-    <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=600&size=22&duration=3000&pause=1000&color=FF69B4&center=true&vCenter=true&width=800&lines=USACO+Gold+Competitor+%F0%9F%8F%86;3X+INOI+Training+Camp+Participant;Embedded+Systems+Engineer+%E2%9A%99%EF%B8%8F;Turning+Complex+Algorithms+Into+Code+%E2%9C%A8" alt="Typing SVG" />
+    <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=600&size=22&duration=1500&pause=500&color=FF69B4&center=true&vCenter=true&width=800&lines=USACO+Gold+Competitor+%F0%9F%8F%86;3X+INOI+Training+Camp+Participant;Embedded+Systems+Engineer+%E2%9A%99%EF%B8%8F;Turning+Complex+Algorithms+Into+Code+%E2%9C%A8" alt="Typing SVG" />
   </a>
 
 </div>
@@ -218,4 +218,3 @@
 </div>
 
 </div>
-
