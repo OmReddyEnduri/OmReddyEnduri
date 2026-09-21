@@ -1,4 +1,3 @@
-
 <div align="center">
 
   <!-- Responsive Animated Waving Banner -->
@@ -87,54 +86,6 @@
       <a href="https://skillicons.dev">
         <img src="https://skillicons.dev/icons?i=linux,ubuntu,git,github,bash&theme=light&perline=2" alt="Environment Tools" />
       </a>
-    </td>
-  </tr>
-</table>
-
-<br><br>
-
-<!-- ========================================== -->
-<!-- FEATURED PROJECTS SECTION                  -->
-<!-- ========================================== -->
-
-<h2 align="center" style="color: #FF69B4;">🚀 Featured Projects</h2>
-
-<table width="100%" border="0" style="border-spacing: 15px;">
-  <tr>
-    <!-- Project 1 -->
-    <td width="50%" valign="top">
-      <div align="center" style="border: 2px solid #EF93C4; border-radius: 15px; padding: 25px; background-color: #FFFDFE; height: 100%;">
-        <h3 style="color: #FF69B4; margin-top: 0;">🤖 Omnidirectional Mobile Robot</h3>
-        <p align="left" style="color: #555555; line-height: 1.5;">
-          A versatile mobile robotics platform featuring mecanum wheels and an integrated robotic arm. Engineered with dual microcontrollers for complex, seamless multi-directional movement and custom power distribution.
-        </p>
-        <div align="left" style="margin: 15px 0;">
-          <img src="https://img.shields.io/badge/C++-EF93C4?style=flat&color=FFF0F5&labelColor=EF93C4&logoColor=333333" />
-          <img src="https://img.shields.io/badge/ESP32-EF93C4?style=flat&color=FFF0F5&labelColor=EF93C4&logoColor=333333" />
-          <img src="https://img.shields.io/badge/Arduino-EF93C4?style=flat&color=FFF0F5&labelColor=EF93C4&logoColor=333333" />
-        </div>
-        <a href="https://github.com/OmReddyEnduri">
-          <img src="https://img.shields.io/badge/View_Source_Code_%E2%86%92-FF69B4?style=for-the-badge&color=FF69B4" />
-        </a>
-      </div>
-    </td>
-    
-    <!-- Project 2 -->
-    <td width="50%" valign="top">
-      <div align="center" style="border: 2px solid #EF93C4; border-radius: 15px; padding: 25px; background-color: #FFFDFE; height: 100%;">
-        <h3 style="color: #FF69B4; margin-top: 0;">⌚ Wear OS Digital Watch Face</h3>
-        <p align="left" style="color: #555555; line-height: 1.5;">
-          A custom-built, beautifully designed digital watch face application optimized for Android Wear OS hardware. Features a personalized time display leveraging modern UI toolkits for fluid performance.
-        </p>
-        <div align="left" style="margin: 15px 0;">
-          <img src="https://img.shields.io/badge/Kotlin-EF93C4?style=flat&color=FFF0F5&labelColor=EF93C4&logoColor=333333" />
-          <img src="https://img.shields.io/badge/Jetpack_Compose-EF93C4?style=flat&color=FFF0F5&labelColor=EF93C4&logoColor=333333" />
-          <img src="https://img.shields.io/badge/Android_Studio-EF93C4?style=flat&color=FFF0F5&labelColor=EF93C4&logoColor=333333" />
-        </div>
-        <a href="https://github.com/OmReddyEnduri">
-          <img src="https://img.shields.io/badge/View_Source_Code_%E2%86%92-FF69B4?style=for-the-badge&color=FF69B4" />
-        </a>
-      </div>
     </td>
   </tr>
 </table>
