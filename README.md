@@ -15,7 +15,7 @@
   </a>
   <br><br>
 
-  <!-- Animated Typing SVG (Sped up: duration=1500, pause=500) -->
+  <!-- Animated Typing SVG (Fast Speed) -->
   <a href="https://github.com/OmReddyEnduri">
     <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=600&size=22&duration=1500&pause=500&color=FF69B4&center=true&vCenter=true&width=800&lines=USACO+Gold+Competitor+%F0%9F%8F%86;3X+INOI+Training+Camp+Participant;Embedded+Systems+Engineer+%E2%9A%99%EF%B8%8F;Turning+Complex+Algorithms+Into+Code+%E2%9C%A8" alt="Typing SVG" />
   </a>
@@ -30,28 +30,27 @@
 
 <h2 align="center" style="color: #FF69B4;">🌸 About Me</h2>
 
-<table width="100%" style="border-collapse: collapse;">
+<table width="100%" border="0" style="border-collapse: collapse;">
   <tr>
-    <td width="60%" valign="top" style="padding: 20px;">
+    <td width="60%" valign="top" style="padding-right: 15px;">
       <p style="color: #555555; font-size: 16px; line-height: 1.6;">
         I'm a developer and competitive programmer who loves diving into algorithm design and hardware engineering. I thrive on bridging the gap between high-level logic and physical devices, optimizing code for speed, and building robust systems.
       </p>
-      
-      <h4 style="color: #FF69B4;">🎯 Current Focus</h4>
-      <ul style="color: #555555;">
+      <h3 style="color: #FF69B4; margin-top: 15px; margin-bottom: 10px;">🎯 Current Focus</h3>
+      <ul style="color: #555555; line-height: 1.8;">
         <li><b>Competitive Programming:</b> USACO Gold, 3X INOI Participant, and currently training hard for the Asia-Pacific Informatics Olympiad (APIO) 2026.</li>
         <li><b>Algorithms:</b> Deeply interested in Advanced Data Structures (Segment Trees, DSU, HLD, Wavelet Trees, Link-Cut Trees).</li>
         <li><b>Hardware:</b> Engineering custom circuits and programming microcontrollers (Arduino Mega 2560, ESP32, ESP8266).</li>
         <li><b>Software:</b> Perfecting high-performance C++ templates with fast I/O and custom debugging utilities.</li>
       </ul>
     </td>
-    <td width="40%" align="center" valign="middle" style="padding: 20px;">
-      <img src="https://images.unsplash.com/photo-1550439062-609e1531270e?auto=format&fit=crop&w=500&q=80" alt="Programming Setup" width="100%" style="border-radius: 20px; border: 4px solid #FFF0F5; box-shadow: 0 4px 12px rgba(255,105,180,0.2);" />
+    <td width="40%" align="center" valign="middle">
+      <img src="https://images.unsplash.com/photo-1550439062-609e1531270e?auto=format&fit=crop&w=500&q=80" alt="Programming Setup" width="100%" style="border-radius: 15px; border: 3px solid #EF93C4;" />
     </td>
   </tr>
 </table>
 
-<br>
+<br><br>
 
 <!-- ========================================== -->
 <!-- TECH STACK SECTION                         -->
@@ -76,11 +75,11 @@
         <img src="https://skillicons.dev/icons?i=arduino,c&theme=light&perline=2" alt="Hardware Stack" />
       </a>
       <br><br>
-      <img src="https://img.shields.io/badge/ESP32-FFF0F5?style=flat&labelColor=FF69B4&color=FFF0F5" />
+      <img src="https://img.shields.io/badge/ESP32-FFF0F5?style=flat&labelColor=FF69B4&color=FFF0F5" alt="ESP32" />
       <br>
-      <img src="https://img.shields.io/badge/ESP8266-FFF0F5?style=flat&labelColor=FF69B4&color=FFF0F5" />
+      <img src="https://img.shields.io/badge/ESP8266-FFF0F5?style=flat&labelColor=FF69B4&color=FFF0F5" alt="ESP8266" />
       <br>
-      <img src="https://img.shields.io/badge/Circuit_Design-FFF0F5?style=flat&labelColor=FF69B4&color=FFF0F5" />
+      <img src="https://img.shields.io/badge/Circuit_Design-FFF0F5?style=flat&labelColor=FF69B4&color=FFF0F5" alt="Circuit Design" />
     </td>
     <td align="center" style="padding: 20px; background-color: #FFFFFF;">
       <a href="https://skillicons.dev">
@@ -150,10 +149,10 @@
   <p style="color: #555555; margin-bottom: 20px;">
     Always open to discussing algorithms, hardware, or exciting new engineering opportunities!
   </p>
-  <a href="[PASTE LINKEDIN URL]">
+  <a href="https://linkedin.com">
     <img src="https://img.shields.io/badge/LinkedIn-EF93C4?style=for-the-badge&logo=linkedin&logoColor=white&labelColor=FF69B4&color=EF93C4" alt="LinkedIn" />
   </a>
-  <a href="[PASTE X/TWITTER URL]">
+  <a href="https://twitter.com">
     <img src="https://img.shields.io/badge/Twitter-EF93C4?style=for-the-badge&logo=x&logoColor=white&labelColor=FF69B4&color=EF93C4" alt="X" />
   </a>
   <a href="mailto:omtheprogrammer1@gmail.com">
@@ -166,6 +165,4 @@
 <!-- Waving Footer -->
 <div align="center">
   <img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=1,2&animation=twinkling&height=150&section=footer" width="100%" alt="Footer Banner" />
-</div>
-
 </div>
