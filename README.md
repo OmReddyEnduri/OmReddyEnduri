@@ -1,4 +1,4 @@
-```markdown
+
 <div align="center">
   <!-- Responsive Banner -->
   <picture>
@@ -139,4 +139,3 @@
   <img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=1,2&animation=twinkling&height=150&section=footer" width="100%" alt="Footer" />
 </div>
 
-```
