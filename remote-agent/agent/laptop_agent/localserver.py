@@ -158,6 +158,14 @@ def create_local_app(engine: AgentEngine, secret: str, port: int) -> FastAPI:
         if not key or not auth.lower().startswith("bearer ") or not secrets.compare_digest(auth[7:].strip(), key):
             raise HTTPException(401, "invalid API key")
 
+    @app.get("/v1/health")
+    def v1_health(request: Request):
+        """No key needed: proves THIS build of the agent is the one answering on this port."""
+        if request.headers.get("host", "") not in ok_hosts:
+            raise HTTPException(400, "bad host")
+        return {"ok": True, "service": "laptop-agent", "api": "openai-compatible", "model": "brain",
+                "state": engine.state, "needs_key_for": ["/v1/models", "/v1/chat/completions"]}
+
     @app.get("/v1/models")
     def v1_models(request: Request):
         v1_guard(request)
@@ -212,6 +220,7 @@ async def _await_reply(engine: AgentEngine, t0: float, wait: int) -> str:
 
 class LocalServer:
     def __init__(self, engine: AgentEngine, port: int):
+        self.engine, self.failed = engine, False
         self.port, self.secret = port, secrets.token_urlsafe(24)
         cfg = uvicorn.Config(create_local_app(engine, self.secret, port), host="127.0.0.1", port=port,
                              log_level="warning")
@@ -223,6 +232,15 @@ class LocalServer:
         return f"http://127.0.0.1:{self.port}/?t={self.secret}"
 
     def start(self):
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            if probe.connect_ex(("127.0.0.1", self.port)) == 0:   # something is already listening
+                self.failed = True
+                msg = (f"Port {self.port} is already in use, so the local API/web UI could not start. Another Laptop "
+                       "Agent (an older copy?) is probably still running. Close it, then restart this app.")
+                print("ERROR: " + msg)
+                self.engine.notify("error", msg)
+                return
         self.thread.start()
 
     def stop(self):

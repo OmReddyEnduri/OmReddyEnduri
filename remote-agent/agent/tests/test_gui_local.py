@@ -127,3 +127,18 @@ def test_local_openai_endpoint(local):
     r = c.post("/v1/chat/completions", headers=H, json={"messages": [{"role": "user", "content": "ping2"}], "wait": 5, "stream": True})
     assert r.status_code == 200 and "data: [DONE]" in r.text
     assert c.post("/v1/chat/completions", headers=H, json={"messages": []}).status_code == 400
+
+
+def test_v1_health_without_key_and_port_conflict(local):
+    eng, c = local
+    r = c.get("/v1/health")
+    assert r.status_code == 200 and r.json()["service"] == "laptop-agent"
+    assert c.get("/v1/health", headers={"Host": "evil.com"}).status_code == 400
+    import socket
+    from laptop_agent.localserver import LocalServer
+    s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(); port = s.getsockname()[1]
+    try:
+        srv = LocalServer(eng, port); srv.start()
+        assert srv.failed and any("already in use" in n["msg"] for n in eng.notices)
+    finally:
+        s.close()
