@@ -111,3 +111,18 @@ def test_validation_and_dashboard(env):
     assert c.get("/dashboard").status_code == 200
     o = c.get("/api/v1/admin/overview", headers=H(ADMIN)).json()
     assert o["devices"][0]["device_id"] == dev
+
+
+def test_two_way_messages(env):
+    c, dev, dtok, _ = env
+    assert c.post("/api/v1/agent/messages", json={"text": "hello brain"}, headers=H(dtok)).status_code == 201
+    r = c.get(f"/api/v1/messages?device_id={dev}", headers=H(BRAIN)).json()
+    assert [m["text"] for m in r["messages"]] == ["hello brain"] and r["last_id"] >= 1
+    assert c.get(f"/api/v1/messages?device_id={dev}&after_id={r['last_id']}", headers=H(BRAIN)).json()["messages"] == []
+    assert c.post("/api/v1/messages", json={"device_id": dev, "text": "hi om"}, headers=H(BRAIN)).status_code == 201
+    got = c.get("/api/v1/agent/messages", headers=H(dtok)).json()
+    assert [m["text"] for m in got["messages"]] == ["hi om"]          # device only sees brain messages
+    assert c.get("/api/v1/agent/messages", headers=H(BRAIN)).status_code == 403
+    assert c.post("/api/v1/messages", json={"device_id": dev, "text": "x"}, headers=H(dtok)).status_code == 403
+    allm = c.get(f"/api/v1/messages?device_id={dev}&direction=all", headers=H(BRAIN)).json()["messages"]
+    assert [m["direction"] for m in allm] == ["user", "brain"]

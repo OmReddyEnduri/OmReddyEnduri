@@ -1,7 +1,11 @@
 """Permission policy: the agent is the final authority. Classifies every task as
 auto / ask / block BEFORE anything runs. Fail closed: unknown or malformed => block."""
+import base64
+import binascii
+import ipaddress
 import os
 import re
+from urllib.parse import urlparse
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -10,6 +14,11 @@ from .config import config_dir
 AUTO, ASK, BLOCK = "auto", "ask", "block"
 MAX_READ = 1_000_000
 MAX_WRITE = 5_000_000
+IMG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+VID_EXT = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
+PASSIVE_PREVIEW = IMG_EXT | VID_EXT | {".pdf", ".txt", ".md"}
+ACTIVE_PREVIEW = {".html", ".htm", ".svg"}
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
 
 SENSITIVE_PARTS = {".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".config/gcloud"}
 SENSITIVE_NAME = re.compile(
@@ -179,22 +188,40 @@ class Policy:
         if ".git" in Path(real).parts and "hooks" in Path(real).parts:
             raise PermissionError("writing git hooks is blocked")
 
+    @staticmethod
+    def _decode(f: dict) -> tuple[bytes, str]:
+        content, enc = f.get("content"), f.get("encoding", "utf8")
+        if not isinstance(content, str):
+            raise ValueError("content must be a string")
+        if enc == "utf8":
+            data = content.encode()
+        elif enc == "base64":
+            try:
+                data = base64.b64decode(content, validate=True)
+            except (binascii.Error, ValueError):
+                raise ValueError("content is not valid base64")
+        else:
+            raise ValueError("encoding must be utf8 or base64")
+        if len(data) > MAX_WRITE:
+            raise ValueError("file larger than 5 MB (use download_file for big files)")
+        preview = content[:3000] if enc == "utf8" else f"(binary file, {len(data)} bytes)"
+        return data, preview
+
     def _c_write_file(self, v, a):
         real = self._path(v, a.get("path"))
         self._write_checks(real)
-        content = a.get("content")
-        if not isinstance(content, str) or len(content.encode()) > MAX_WRITE:
-            raise ValueError("content must be a string of at most 5 MB")
+        data, preview = self._decode(a)
+        content = a["content"]
         exists = os.path.exists(real)
         if os.path.isdir(real):
             raise ValueError("path is a directory")
         overwrite = bool(a.get("overwrite", False))
         if exists and not overwrite:
             raise ValueError("file exists; set overwrite=true to modify it")
-        v.plan = {"path": real, "content": content, "exists": exists}
+        v.plan = {"path": real, "data": data, "exists": exists}
         v.files, v.level = [real], ASK
-        v.impact = (f"{'Overwrites existing' if exists else 'Creates new'} file ({len(content.encode())} bytes).")
-        v.preview = content[:3000]
+        v.impact = (f"{'Overwrites existing' if exists else 'Creates new'} file ({len(data)} bytes).")
+        v.preview = preview
 
     def _c_make_dir(self, v, a):
         real = self._path(v, a.get("path"))
@@ -293,7 +320,7 @@ class Policy:
             raise ValueError("files must be a list of 1-50 {path, content}")
         out, total, seen = [], 0, set()
         for f in files:
-            if not (isinstance(f, dict) and isinstance(f.get("content"), str)):
+            if not isinstance(f, dict):
                 raise ValueError("each file needs path and string content")
             real = self._path(v, f.get("path"))
             self._write_checks(real)
@@ -304,14 +331,83 @@ class Policy:
             seen.add(os.path.normcase(real))
             if os.path.exists(real) and not overwrite:
                 raise ValueError(f"file exists (set overwrite=true): {real}")
-            total += len(f["content"].encode())
-            out.append({"path": real, "content": f["content"], "exists": os.path.exists(real)})
+            data, pv = self._decode(f)
+            total += len(data)
+            out.append({"path": real, "data": data, "exists": os.path.exists(real), "pv": pv})
         if total > MAX_WRITE:
             raise ValueError("total content exceeds 5 MB")
         n_over = sum(1 for f in out if f["exists"])
         v.plan, v.files, v.level = {"files": out}, [f["path"] for f in out], ASK
         v.impact = f"Creates {len(out) - n_over} and overwrites {n_over} file(s), {total} bytes total."
-        v.preview = "\n\n".join(f"=== {f['path']} ===\n{f['content'][:800]}" for f in out[:4])
+        v.preview = "\n\n".join(f"=== {f['path']} ===\n{f['pv'][:800]}" for f in out[:4])
+
+    def _c_open_preview(self, v, a):
+        url, path = a.get("url"), a.get("path")
+        if (url is None) == (path is None):
+            raise ValueError("give exactly one of 'path' or 'url'")
+        if url is not None:
+            u = urlparse(str(url))
+            if u.scheme not in ("http", "https") or (u.hostname or "").lower() not in LOCAL_HOSTS:
+                raise PermissionError("only http(s)://localhost URLs can be previewed")
+            v.plan, active = {"url": url}, True
+            v.impact = "Opens this local page in your default browser."
+        else:
+            real = self._path(v, path)
+            ext = os.path.splitext(real)[1].lower()
+            if ext not in PASSIVE_PREVIEW | ACTIVE_PREVIEW or self._sensitive(real):
+                raise PermissionError("previewable types: html, svg, images, video, pdf, txt, md")
+            if not os.path.isfile(real):
+                raise ValueError("file does not exist")
+            v.plan, v.files, active = {"path": real}, [real], ext in ACTIVE_PREVIEW
+            v.impact = "Opens this file in your default browser/viewer" + (" (a web page: its scripts will run)." if active else ".")
+        # Level 1: always automatic. Level 2: passive files automatic, web pages ask. Level 3: ask.
+        v.level = AUTO if (self.level == 1 or (self.level == 2 and not active)) else ASK
+
+    def _media_path(self, v, a, exts):
+        real = self._path(v, a.get("path"))
+        if os.path.splitext(real)[1].lower() not in exts:
+            raise ValueError(f"unsupported file type; allowed: {sorted(exts)}")
+        if self._sensitive(real) or not os.path.isfile(real):
+            raise PermissionError("not a readable media file")
+        return real
+
+    def _c_read_image(self, v, a):
+        real = self._media_path(v, a, IMG_EXT)
+        if os.path.getsize(real) > 25_000_000:
+            raise ValueError("image larger than 25 MB")
+        v.plan = {"path": real, "max_width": max(200, min(int(a.get("max_width", 1280)), 1920))}
+        v.files, v.level = [real], AUTO
+        v.impact = "Read-only: sends a downscaled copy of this image to the Brain."
+
+    def _c_video_frames(self, v, a):
+        real = self._media_path(v, a, VID_EXT)
+        v.plan = {"path": real, "count": max(1, min(int(a.get("count", 4)), 8)),
+                  "max_width": max(200, min(int(a.get("max_width", 960)), 1280))}
+        v.files, v.level = [real], AUTO
+        v.impact = "Read-only: extracts a few still frames (needs ffmpeg) and sends them to the Brain."
+
+    def _c_download_file(self, v, a):
+        url = str(a.get("url", ""))
+        u = urlparse(url)
+        host = (u.hostname or "").lower()
+        if u.scheme != "https" or not host or host in LOCAL_HOSTS or u.username or u.password:
+            raise PermissionError("only plain https:// URLs to public hosts are allowed")
+        try:
+            ip = ipaddress.ip_address(host)
+            if not ip.is_global:
+                raise PermissionError("private/internal addresses are blocked")
+        except ValueError:
+            pass
+        real = self._path(v, a.get("path"))
+        self._write_checks(real)
+        if os.path.isdir(real):
+            raise ValueError("path is a directory")
+        if os.path.exists(real) and not a.get("overwrite"):
+            raise ValueError("file exists; set overwrite=true")
+        mb = max(1, min(int(a.get("max_mb", 200)), 1000))
+        v.plan = {"url": url, "path": real, "max_bytes": mb * 1_000_000}
+        v.files, v.level = [real], ASK
+        v.impact = f"Downloads from {host} (up to {mb} MB) and saves it to this file."
 
     def _c_screenshot(self, v, a):
         import time as _t

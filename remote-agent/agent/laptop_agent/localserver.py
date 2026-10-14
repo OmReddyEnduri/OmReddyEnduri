@@ -30,27 +30,33 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;p
 <div class="card"><b>Tasks</b><table id="tk"></table></div>
 <div class="card"><b>Notifications</b><pre id="nt"></pre></div>
 <div class="card"><b>Terminal output</b><pre id="tm"></pre></div>
-<div class="card"><b>Chat (fixed commands only — type <code>help</code>)</b><pre id="ch"></pre><input id="in" size="40" autocomplete="off"> <button onclick="send()">Send</button></div>
+<div class="card"><b>Chat with the Brain</b> (local commands start with /, try <code>/help</code>)<pre id="ch"></pre><input id="in" size="40" autocomplete="off"> <button onclick="send()">Send</button></div>
 <script>
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const H={'X-Requested-With':'agent-ui'};
 async function g(){const r=await fetch('/api/state',{headers:H});if(!r.ok)return;const s=await r.json();
  st.innerHTML=`<b>Connection:</b> <span class="${s.state==='connected'?'ok':'bad'}">${esc(s.state)}</span>${s.paused?' (paused)':''}<br><b>Relay:</b> ${esc(s.relay_url)}<br><b>Device:</b> ${esc(s.device_id)}<br><b>Active task:</b> ${esc(s.active||'-')}<br><b>Security level:</b> ${esc(s.security_level)}<br><b>Workspaces:</b> ${esc(s.workspaces.join(', '))}`;
  tk.innerHTML='<tr><th>Request</th><th>Type</th><th>Risk</th><th>Status</th></tr>'+s.tasks.map(t=>`<tr><td>${esc(t.request_id)}</td><td>${esc(t.task_type)}</td><td>${esc(t.risk)}</td><td>${esc(t.status)}</td></tr>`).join('');
- nt.textContent=s.notices.map(n=>n.level.toUpperCase()+': '+n.msg).join('\\n');tm.textContent=s.terminal.join('\\n')}
+ ch.textContent=s.chat.map(m=>(m.who==='you'?'You: ':'Brain: ')+m.text).join('\\n');nt.textContent=s.notices.map(n=>n.level.toUpperCase()+': '+n.msg).join('\\n');tm.textContent=s.terminal.join('\\n')}
 async function c(a){const r=await fetch('/api/control/'+a,{method:'POST',headers:H});msg.textContent=r.ok?'':' failed';g()}
 async function send(){const t=document.getElementById('in').value;if(!t)return;document.getElementById('in').value='';
  const r=await fetch('/api/chat',{method:'POST',headers:{...H,'Content-Type':'application/json'},body:JSON.stringify({text:t})});
- const j=await r.json();ch.textContent+='> '+t+'\\n'+j.reply+'\\n';ch.scrollTop=ch.scrollHeight}
+ const j=await r.json();if(j.reply&&j.reply!=='Sent to the Brain.')ch.textContent+='\\n['+j.reply+']';g()}
 g();setInterval(g,2000);
 </script></body></html>"""
 
-HELP = ("Commands: status | level | pause | resume | disconnect | start | tasks | last | workspaces | help.\n"
-        "This chat cannot run commands or approve operations.")
+HELP = ("Type normally to talk to the Brain. Local commands start with /: /status /level /pause /resume "
+        "/disconnect /start /tasks /last /workspaces /help.\nThis chat cannot run commands or approve operations.")
 
 
 def chat_reply(engine: AgentEngine, text: str) -> str:
-    cmd = text.strip().lower()
+    """Plain text goes to the Brain (as a message, never executed). '/command' runs a fixed local command."""
+    text = text.strip()
+    if not text:
+        return ""
+    if not text.startswith("/"):
+        return "Sent to the Brain." if engine.send_user_message(text) else "Not connected — press Start first."
+    cmd = text[1:].strip().lower()
     if cmd == "help":
         return HELP
     if cmd == "status":
@@ -78,7 +84,7 @@ def chat_reply(engine: AgentEngine, text: str) -> str:
     if cmd in ("tasks", "last"):
         rows = list(engine.tasks)[: (1 if cmd == "last" else 5)]
         return "\n".join(f"{t['request_id']} {t.get('task_type','')} {t.get('status','')}" for t in rows) or "No tasks yet."
-    return "I only understand fixed commands. " + HELP
+    return "Unknown command. " + HELP
 
 
 def create_local_app(engine: AgentEngine, secret: str, port: int) -> FastAPI:

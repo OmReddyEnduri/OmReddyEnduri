@@ -151,3 +151,37 @@ def test_security_levels(pol, level, new_file, overwrite, mkdir, cmd, delete, sh
     assert lvl(p, "write_file", {"path": str(ws / ".bashrc"), "content": "x"}) == BLOCK
     assert lvl(p, "write_file", {"path": "/etc/x", "content": "x"}) == BLOCK
     assert lvl(p, "run_command", {"argv": ["sudo", "ls"]}) == BLOCK
+
+
+def test_preview_media_download_policies(pol):
+    import base64
+    p, ws = pol
+    (ws / "p.html").write_text("<h1>x</h1>"); (ws / "i.png").write_bytes(b"\x89PNG"); (ws / "v.mp4").write_bytes(b"x")
+    for level, html, png in ((1, AUTO, AUTO), (2, ASK, AUTO), (3, ASK, ASK)):
+        p.level = level
+        assert lvl(p, "open_preview", {"path": str(ws / "p.html")}) == html
+        assert lvl(p, "open_preview", {"path": str(ws / "i.png")}) == png
+    p.level = 2
+    assert lvl(p, "open_preview", {"url": "http://localhost:5173/"}) == ASK
+    assert lvl(p, "open_preview", {"url": "http://evil.com/"}) == BLOCK
+    assert lvl(p, "open_preview", {"path": "/etc/passwd"}) == BLOCK
+    assert lvl(p, "open_preview", {"path": str(ws / ".env")}) == BLOCK
+    assert lvl(p, "read_image", {"path": str(ws / "i.png")}) == AUTO
+    assert lvl(p, "read_image", {"path": str(ws / "a.txt")}) == BLOCK         # wrong type
+    assert lvl(p, "video_frames", {"path": str(ws / "v.mp4"), "count": 99}) == AUTO
+    assert p.classify("video_frames", {"path": str(ws / "v.mp4"), "count": 99}).plan["count"] == 8
+    # downloads: https only, public hosts, always ask, any level
+    for lv in (1, 2, 3):
+        p.level = lv
+        assert lvl(p, "download_file", {"url": "https://example.com/v.mp4", "path": str(ws / "v2.mp4")}) == ASK
+    for bad in ("http://example.com/x", "https://localhost/x", "https://127.0.0.1/x", "https://10.0.0.5/x",
+                "https://user:pw@example.com/x", "file:///etc/passwd"):
+        assert lvl(p, "download_file", {"url": bad, "path": str(ws / "d.bin")}) == BLOCK, bad
+    assert lvl(p, "download_file", {"url": "https://example.com/x", "path": "/etc/x"}) == BLOCK
+    # binary writes
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"0" * 50).decode()
+    p.level = 3
+    v = p.classify("write_file", {"path": str(ws / "logo.png"), "content": png, "encoding": "base64"})
+    assert v.level == ASK and "binary" in v.preview and v.plan["data"].startswith(b"\x89PNG")
+    assert lvl(p, "write_file", {"path": str(ws / "b.png"), "content": "!!notb64", "encoding": "base64"}) == BLOCK
+    assert lvl(p, "write_file", {"path": str(ws / "b.png"), "content": "x", "encoding": "hex"}) == BLOCK

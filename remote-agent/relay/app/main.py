@@ -18,7 +18,7 @@ from . import schemas
 from .auth import (get_db, hash_token, new_device_token, require_admin, require_brain,
                    require_device, require_enroll)
 from .config import Settings, load_settings
-from .db import AuditLog, Device, Task, make_session_factory, utcnow
+from .db import AuditLog, Device, Message, Task, make_session_factory, utcnow
 
 TERMINAL = {"completed", "failed", "timeout", "cancelled", "rejected", "blocked", "expired"}
 INFLIGHT = ("claimed", "running")
@@ -295,6 +295,64 @@ def create_app(settings: Settings | None = None) -> FastAPI:
               f"exit={body.exit_code}")
         db.commit()
         return task_json(t, full=False)
+
+    # --------------------------------------------------------------- messages
+    def msg_json(m: Message) -> dict:
+        return {"id": m.id, "direction": m.direction, "text": m.text, "created_at": iso(m.created_at)}
+
+    def fetch_msgs(db: Session, device_id: str, directions, after_id: int, limit: int):
+        q = select(Message).where(Message.device_id == device_id, Message.direction.in_(directions))
+        if after_id <= 0:  # first call: newest `limit` messages, oldest first
+            rows = list(reversed(db.scalars(q.order_by(Message.id.desc()).limit(limit)).all()))
+        else:
+            rows = db.scalars(q.where(Message.id > after_id).order_by(Message.id).limit(limit)).all()
+        return rows
+
+    @app.post("/api/v1/agent/messages", status_code=201)
+    def user_says(body: schemas.UserMessage, dev: Device = Depends(require_device),
+                  db: Session = Depends(get_db)):
+        """Laptop app -> Brain: something the user typed."""
+        m = Message(device_id=dev.id, direction="user", text=body.text)
+        db.add(m)
+        audit(db, f"device:{dev.id}", "user_message", device_id=dev.id, detail=body.text[:200])
+        db.commit()
+        return msg_json(m)
+
+    @app.get("/api/v1/agent/messages")
+    def brain_says(after_id: int = 0, limit: int = Query(20, ge=1, le=100),
+                   dev: Device = Depends(require_device), db: Session = Depends(get_db)):
+        """Brain -> laptop app."""
+        rows = fetch_msgs(db, dev.id, ("brain",), after_id, limit)
+        return {"messages": [msg_json(m) for m in rows], "last_id": rows[-1].id if rows else after_id}
+
+    @app.get("/api/v1/messages")
+    def brain_listens(device_id: str, after_id: int = 0, direction: str = "user", wait: int = Query(0, ge=0, le=25),
+                      limit: int = Query(20, ge=1, le=100), db: Session = Depends(get_db),
+                      _=Depends(require_brain)):
+        """Brain polls what the user said (direction=user), optionally long-polling up to 25 s."""
+        import time
+        if direction not in ("user", "brain", "all"):
+            raise HTTPException(422, "direction must be user, brain or all")
+        dirs = ("user", "brain") if direction == "all" else (direction,)
+        end = time.monotonic() + wait
+        while True:
+            rows = fetch_msgs(db, device_id, dirs, after_id, limit)
+            if rows or time.monotonic() >= end:
+                break
+            time.sleep(1)
+            db.rollback()  # end the read transaction so the next poll sees new rows
+        return {"messages": [msg_json(m) for m in rows], "last_id": rows[-1].id if rows else after_id}
+
+    @app.post("/api/v1/messages", status_code=201)
+    def brain_replies(body: schemas.BrainMessage, db: Session = Depends(get_db), _=Depends(require_brain)):
+        dev = db.get(Device, body.device_id)
+        if dev is None or dev.revoked:
+            raise HTTPException(404, "unknown or revoked device")
+        m = Message(device_id=dev.id, direction="brain", text=body.text)
+        db.add(m)
+        audit(db, "brain", "brain_message", device_id=dev.id, detail=body.text[:200])
+        db.commit()
+        return msg_json(m)
 
     # ----------------------------------------------------------------- admin
     @app.get("/api/v1/admin/overview")

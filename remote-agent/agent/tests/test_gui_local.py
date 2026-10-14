@@ -81,8 +81,9 @@ def test_local_ui_requires_secret_host_and_header(local):
     assert c.post("/api/approve/r1", headers={"X-Requested-With": "agent-ui"}).status_code in (404, 405)  # no approval API
 
 
-def test_chat_cannot_execute(local):
+def test_chat_slash_commands_and_no_execution(local):
     eng, _ = local
-    assert "fixed commands" in chat_reply(eng, "rm -rf /")
-    assert "fixed commands" in chat_reply(eng, "run echo hi")
-    assert chat_reply(eng, "workspaces")
+    assert "Unknown command" in chat_reply(eng, "/rm -rf /")
+    assert "Not connected" in chat_reply(eng, "run echo hi")        # plain text goes to the Brain, never executed
+    assert "desktop window" in chat_reply(eng, "/level")
+    assert chat_reply(eng, "/workspaces")

@@ -63,6 +63,8 @@ class AgentEngine:
         self.tasks: deque = deque(maxlen=200)       # newest first; dicts for UI
         self.terminal: deque = deque(maxlen=2000)
         self.notices: deque = deque(maxlen=200)
+        self.chat: deque = deque(maxlen=300)         # {who: you|brain, text, ts}
+        self._chat_last = 0
         self.last_error = ""
         self._listeners: list[Callable] = []
         self._stop = threading.Event()
@@ -134,7 +136,8 @@ class AgentEngine:
             self._client = RelayClient(self.cfg.relay_url, self.cfg.device_token)
             self._set_state(RECONNECTING)
             self._threads = [threading.Thread(target=self._heartbeat_loop, name="hb", daemon=True),
-                             threading.Thread(target=self._poll_loop, name="poll", daemon=True)]
+                             threading.Thread(target=self._poll_loop, name="poll", daemon=True),
+                             threading.Thread(target=self._chat_loop, name="chat", daemon=True)]
             for t in self._threads:
                 t.start()
         self.audit.write("started", relay=self.cfg.relay_url, device=self.cfg.device_id)
@@ -231,6 +234,43 @@ class AgentEngine:
                     self._cancel.pop(task.get("request_id"), None)
                 continue
             self._stop.wait(self.cfg.poll_interval_s * random.uniform(0.8, 1.2))
+
+    # -------------------------------------------------------------------- chat
+    def send_user_message(self, text: str) -> bool:
+        """User typed something in the app -> relay -> Brain (text only; never executes anything)."""
+        text = (text or "").strip()[:4000]
+        if not text or not self._client or self._stop.is_set():
+            return False
+        self._add_chat("you", text)
+
+        def post():
+            try:
+                self._client.send_message(text)
+            except Exception as e:
+                self.notify("warning", f"Message not delivered to the Brain: {e}")
+        threading.Thread(target=post, daemon=True).start()
+        return True
+
+    def _add_chat(self, who: str, text: str):
+        row = {"who": who, "text": text, "ts": time.time()}
+        self.chat.append(row)
+        self._emit("chat", row)
+
+    def _chat_loop(self):
+        while not self._stop.is_set():
+            try:
+                r = self._client.brain_messages(self._chat_last)
+                for m in r.get("messages", []):
+                    self._add_chat("brain", m["text"])
+                    self.audit.write("brain_message", text=m["text"][:200])
+                self._chat_last = r.get("last_id", self._chat_last)
+                self._stop.wait(2.5)
+            except RelayError as e:
+                if e.permanent:
+                    return
+                self._stop.wait(5)
+            except httpx.HTTPError:
+                self._stop.wait(5)
 
     def _auth_failed(self, e):
         self.notify("error", f"Relay rejected this device ({e}). Token revoked or wrong. Disconnecting.")
@@ -337,7 +377,7 @@ class AgentEngine:
                 "relay_url": self.cfg.relay_url, "security_level": self.policy.level, "device_id": self.cfg.device_id,
                 "workspaces": self.cfg.workspaces, "last_error": self.last_error,
                 "tasks": [{k: v for k, v in t.items() if k != "arguments"} for t in list(self.tasks)[:100]],
-                "terminal": list(self.terminal)[-300:], "notices": list(self.notices)[:50]}
+                "terminal": list(self.terminal)[-300:], "chat": list(self.chat)[-60:], "notices": list(self.notices)[:50]}
 
 
 class _AnyEvent:

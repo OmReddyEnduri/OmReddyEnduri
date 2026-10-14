@@ -240,12 +240,13 @@ class MainWindow(QMainWindow):
         cl = QVBoxLayout(chat)
         cl.addWidget(self.chatlog)
         self.chat_in = QLineEdit()
-        self.chat_in.setPlaceholderText("Fixed commands only — type 'help'. This cannot run commands.")
+        self.chat_in.setPlaceholderText("Talk to the Brain… (local commands start with /, try /help — chat never runs commands)")
         cl.addWidget(self.chat_in)
         for name, wid in (("Activity", self.table), ("Terminal", self.terminal),
                           ("Notifications", self.notices), ("Chat", chat)):
             self.tabs.addTab(wid, name)
 
+        self.tabs.currentChanged.connect(lambda i: self.tabs.setTabText(3, "Chat") if i == 3 else None)
         self.b_start.clicked.connect(self.engine.start)
         self.b_pause.clicked.connect(self._toggle_pause)
         self.b_disc.clicked.connect(lambda: threading.Thread(target=self.engine.disconnect, daemon=True).start())
@@ -279,12 +280,20 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def _chat(self):
-        text = self.chat_in.text()
+        text = self.chat_in.text().strip()
         self.chat_in.clear()
-        self.chatlog.appendPlainText(f"> {text}")
-        self.chatlog.appendPlainText(chat_reply(self.engine, text))
+        if not text:
+            return
+        reply = chat_reply(self.engine, text)      # engine echoes "You:" itself when text goes to the Brain
+        if text.startswith("/") or reply != "Sent to the Brain.":
+            self.chatlog.appendPlainText(f"[{reply}]")
 
     def _on_event(self, kind, data):
+        if kind == "chat":
+            self.chatlog.appendPlainText(("You: " if data["who"] == "you" else "Brain: ") + data["text"])
+            if data["who"] == "brain":
+                self.tabs.setTabText(3, "Chat ●")
+                QApplication.alert(self)
         if kind == "notice":
             self.notices.appendPlainText(f"{data['level'].upper()}: {data['msg']}")
             if data["level"] == "error":

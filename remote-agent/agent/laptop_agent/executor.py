@@ -132,7 +132,7 @@ def execute(v: Verdict, task_timeout: int, cap: int, cancel: threading.Event, on
             done = []
             try:
                 for f in v.plan["files"]:
-                    _atomic_write(f["path"], f["content"])
+                    _atomic_write(f["path"], f["data"])
                     done.append(f["path"])
             except OSError as e:
                 return ExecResult("failed", 1, stdout="\n".join(f"wrote {p}" for p in done),
@@ -140,14 +140,22 @@ def execute(v: Verdict, task_timeout: int, cap: int, cancel: threading.Event, on
             return ExecResult(stdout="\n".join(f"wrote {p}" for p in done), data={"written": done}, started=started)
         if t == "write_file":
             path = v.plan["path"]
-            _atomic_write(path, v.plan["content"])
-            return ExecResult(stdout=f"wrote {len(v.plan['content'].encode())} bytes to {path}", started=started)
+            _atomic_write(path, v.plan["data"])
+            return ExecResult(stdout=f"wrote {len(v.plan['data'])} bytes to {path}", started=started)
         if t == "make_dir":
             os.makedirs(v.plan["path"], exist_ok=True)
             return ExecResult(stdout=f"created {v.plan['path']}", started=started)
         if t == "delete_file":
             os.unlink(v.plan["path"])
             return ExecResult(stdout=f"deleted {v.plan['path']}", started=started)
+        if t == "open_preview":
+            return _open_preview(v.plan, started)
+        if t == "read_image":
+            return _read_image(v.plan, started)
+        if t == "video_frames":
+            return _video_frames(v.plan, started, cancel)
+        if t == "download_file":
+            return _download(v.plan, task_timeout, cancel, started)
         if t == "screenshot":
             return _screenshot(v.plan, started)
         if t in ("run_command", "run_script", "install_package"):
@@ -199,12 +207,12 @@ def _screenshot(plan: dict, started: str) -> ExecResult:
     return ExecResult(stdout=f"screenshot saved to {path} ({img.width}x{img.height})", data=data, started=started)
 
 
-def _atomic_write(path: str, content: str) -> None:
+def _atomic_write(path: str, data: bytes) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".agent-tmp-")
     try:
         with os.fdopen(fd, "wb") as f:
-            f.write(content.encode())
+            f.write(data)
         if os.path.exists(path):
             shutil.copymode(path, tmp)
         os.replace(tmp, path)
@@ -261,3 +269,132 @@ def _read_files(plan: dict, started: str) -> ExecResult:
     summary = f"{len(files)} file(s), {total} chars, {len(skipped)} skipped"
     return ExecResult(stdout=summary, truncated=any(f["truncated"] for f in files) or bool(skipped),
                       data={"files": files, "skipped": skipped, "total_chars": total}, started=started)
+
+
+def _jpeg_b64(img, max_width: int, budget: int = 700_000):
+    import base64
+    import io
+    img = img.convert("RGB")
+    if img.width > max_width:
+        img = img.resize((max_width, round(img.height * max_width / img.width)))
+    q = 72
+    while True:
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=q)
+        if buf.tell() <= budget or img.width <= 320:
+            return base64.b64encode(buf.getvalue()).decode(), img.width, img.height
+        img = img.resize((img.width * 3 // 4, img.height * 3 // 4))
+        q = 60
+
+
+def _open_preview(plan: dict, started: str) -> ExecResult:
+    import webbrowser
+    from pathlib import Path
+    target = plan.get("url") or Path(plan["path"]).as_uri()
+    try:
+        ok = webbrowser.open(target)
+    except Exception as e:
+        return ExecResult("failed", 1, error=f"could not open browser: {e}", started=started)
+    if not ok:
+        return ExecResult("failed", 1, error="no browser/viewer available to open the preview", started=started)
+    return ExecResult(stdout=f"opened {target} on the laptop", started=started)
+
+
+def _read_image(plan: dict, started: str) -> ExecResult:
+    try:
+        from PIL import Image
+        with Image.open(plan["path"]) as im:
+            w, h = im.size
+            b64, iw, ih = _jpeg_b64(im, plan["max_width"])
+    except ImportError:
+        return ExecResult("failed", 1, error="Pillow is not installed", started=started)
+    except Exception as e:
+        return ExecResult("failed", 1, error=f"cannot read image: {type(e).__name__}: {e}", started=started)
+    return ExecResult(stdout=f"image {plan['path']} {w}x{h}", started=started,
+                      data={"path": plan["path"], "width": w, "height": h, "image_mime": "image/jpeg",
+                            "image_base64": b64, "image_width": iw, "image_height": ih})
+
+
+def _video_frames(plan: dict, started: str, cancel) -> ExecResult:
+    import base64
+    ff, fp = shutil.which("ffmpeg"), shutil.which("ffprobe")
+    if not ff or not fp:
+        return ExecResult("failed", 1, error="ffmpeg/ffprobe not found. Install ffmpeg (Windows: winget install Gyan.FFmpeg) and restart the agent.", started=started)
+    try:
+        dur = float(subprocess.run([fp, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", plan["path"]],
+                                   capture_output=True, text=True, timeout=30).stdout.strip() or 0)
+    except (subprocess.SubprocessError, ValueError, OSError) as e:
+        return ExecResult("failed", 1, error=f"ffprobe failed: {e}", started=started)
+    n = plan["count"]
+    frames = []
+    with tempfile.TemporaryDirectory() as td:
+        for i in range(n):
+            if cancel.is_set():
+                return ExecResult("cancelled", None, error="cancelled", started=started)
+            t = dur * (i + 0.5) / n if dur else 0
+            out = os.path.join(td, f"f{i}.jpg")
+            r = subprocess.run([ff, "-v", "error", "-ss", f"{t:.2f}", "-i", plan["path"], "-frames:v", "1",
+                                "-vf", f"scale='min({plan['max_width']},iw)':-2", "-q:v", "5", out],
+                               capture_output=True, timeout=60)
+            if r.returncode == 0 and os.path.exists(out):
+                with open(out, "rb") as f:
+                    frames.append({"t_seconds": round(t, 2), "image_mime": "image/jpeg",
+                                   "image_base64": base64.b64encode(f.read()).decode()})
+    if not frames:
+        return ExecResult("failed", 1, error="could not extract frames", started=started)
+    return ExecResult(stdout=f"{len(frames)} frame(s) from {plan['path']} (duration {dur:.1f}s)", started=started,
+                      data={"path": plan["path"], "duration_seconds": dur, "frames": frames})
+
+
+ALLOW_PRIVATE_DOWNLOADS = False   # tests only
+
+
+def _public_host(host: str) -> bool:
+    import ipaddress
+    import socket
+    if ALLOW_PRIVATE_DOWNLOADS:
+        return True
+    try:
+        return all(ipaddress.ip_address(ai[4][0]).is_global for ai in socket.getaddrinfo(host, None))
+    except (socket.gaierror, ValueError):
+        return False
+
+
+def _download(plan: dict, timeout: int, cancel, started: str) -> ExecResult:
+    from urllib.parse import urljoin, urlparse
+    import httpx
+    url, deadline = plan["url"], time.monotonic() + min(timeout, 3600)
+    path, cap = plan["path"], plan["max_bytes"]
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".agent-dl-")
+    size = 0
+    try:
+        with os.fdopen(fd, "wb") as f, httpx.Client(follow_redirects=False, timeout=30) as c:
+            for _ in range(4):                                   # manual redirects, re-checking each hop
+                u = urlparse(url)
+                if (u.scheme != "https" and not ALLOW_PRIVATE_DOWNLOADS) or not _public_host(u.hostname or ""):
+                    return ExecResult("failed", 1, error="blocked: non-https or non-public host", started=started)
+                with c.stream("GET", url) as r:
+                    if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("location"):
+                        url = urljoin(url, r.headers["location"])
+                        continue
+                    if r.status_code != 200:
+                        return ExecResult("failed", 1, error=f"HTTP {r.status_code}", started=started)
+                    for chunk in r.iter_bytes(65536):
+                        size += len(chunk)
+                        if size > cap:
+                            return ExecResult("failed", 1, error="download exceeds size limit", started=started)
+                        if cancel.is_set() or time.monotonic() > deadline:
+                            return ExecResult("timeout" if not cancel.is_set() else "cancelled", None,
+                                              error="stopped", started=started)
+                        f.write(chunk)
+                break
+            else:
+                return ExecResult("failed", 1, error="too many redirects", started=started)
+        os.replace(tmp, path)
+    except (httpx.HTTPError, OSError) as e:
+        return ExecResult("failed", 1, error=f"{type(e).__name__}: {e}", started=started)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    return ExecResult(stdout=f"downloaded {size} bytes to {path}", data={"path": path, "bytes": size}, started=started)

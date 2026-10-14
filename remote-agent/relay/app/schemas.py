@@ -7,7 +7,7 @@ ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 TASK_TYPES = (
     "device_status", "list_dir", "read_file", "write_file", "make_dir",
     "delete_file", "run_command", "run_script", "install_package", "screenshot",
-    "read_files", "write_files",
+    "read_files", "write_files", "open_preview", "read_image", "video_frames", "download_file",
 )
 
 
@@ -53,3 +53,12 @@ class Result(BaseModel):
     started_at: str | None = None
     completed_at: str | None = None
     data: dict[str, Any] | None = None
+
+
+class UserMessage(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
+
+
+class BrainMessage(BaseModel):
+    device_id: str
+    text: str = Field(min_length=1, max_length=4000)

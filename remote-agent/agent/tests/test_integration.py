@@ -241,3 +241,64 @@ def test_level2_auto_creates_new_files_but_asks_to_overwrite(stack):
     submit(brain, cfg, "t-l1c", "run_command", {"argv": ["python3", "-c", "print(1)"]})
     wait(brain, "t-l1c"); assert len(appr.seen) == 2                              # commands always ask
     assert (ws / "new.jsx").read_text() == "c"
+
+
+def test_chat_both_ways(stack):
+    eng, brain, appr, cfg, ws, _ = stack
+    assert eng.send_user_message("hello brain, can you hear me?")
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        r = brain.get(f"/api/v1/messages?device_id={cfg.device_id}").json()
+        if r["messages"]: break
+        time.sleep(0.2)
+    assert [m["text"] for m in r["messages"]] == ["hello brain, can you hear me?"]
+    brain.post("/api/v1/messages", json={"device_id": cfg.device_id, "text": "loud and clear"})
+    deadline = time.time() + 10
+    while time.time() < deadline and not any(c["who"] == "brain" for c in eng.chat): time.sleep(0.2)
+    assert [c["text"] for c in eng.chat if c["who"] == "brain"] == ["loud and clear"]
+
+
+def test_binary_write_read_image_video_preview_download(stack, monkeypatch):
+    import base64, io, subprocess, webbrowser, http.server, functools
+    from PIL import Image
+    eng, brain, appr, cfg, ws, _ = stack
+    eng.set_security_level(1)
+    buf = io.BytesIO(); Image.new("RGB", (1600, 900), (200, 30, 30)).save(buf, "PNG")
+    submit(brain, cfg, "t-img", "write_file", {"path": str(ws / "m" / "red.png"), "encoding": "base64",
+                                               "content": base64.b64encode(buf.getvalue()).decode()})
+    assert wait(brain, "t-img")["status"] == "completed" and (ws / "m" / "red.png").read_bytes() == buf.getvalue()
+    submit(brain, cfg, "t-ri", "read_image", {"path": str(ws / "m" / "red.png"), "max_width": 640})
+    j = wait(brain, "t-ri")
+    assert j["data"]["width"] == 1600 and j["data"]["image_width"] == 640
+    assert base64.b64decode(j["data"]["image_base64"])[:2] == b"\xff\xd8" and appr.seen == []
+    # real video via ffmpeg
+    vid = ws / "m" / "clip.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=duration=2:size=320x240:rate=10",
+                    "-pix_fmt", "yuv420p", str(vid)], check=True)
+    submit(brain, cfg, "t-vf", "video_frames", {"path": str(vid), "count": 3})
+    j = wait(brain, "t-vf", t=40)
+    assert j["status"] == "completed" and len(j["data"]["frames"]) == 3
+    assert base64.b64decode(j["data"]["frames"][0]["image_base64"])[:2] == b"\xff\xd8"
+    # preview opens (browser stubbed)
+    opened = []
+    monkeypatch.setattr(webbrowser, "open", lambda u: opened.append(u) or True)
+    (ws / "index.html").write_text("<h1>hi</h1>")
+    submit(brain, cfg, "t-pv", "open_preview", {"path": str(ws / "index.html")})
+    assert wait(brain, "t-pv")["status"] == "completed" and opened and opened[0].startswith("file:")
+    # download (loopback allowed only via the test flag)
+    import laptop_agent.executor as ex
+    monkeypatch.setattr(ex, "ALLOW_PRIVATE_DOWNLOADS", True)
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(ws / "m")))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    # policy blocks http/localhost, so exercise the executor path directly with a verdict
+    from laptop_agent.policy import Verdict
+    v = Verdict("ask", "download_file", {}, plan={"url": f"http://127.0.0.1:{srv.server_port}/clip.mp4", "path": str(ws / "dl" / "clip.mp4"), "max_bytes": 5_000_000})
+    r = ex.execute(v, 20, 1000, threading.Event())
+    srv.shutdown()
+    assert r.status == "completed" and (ws / "dl" / "clip.mp4").read_bytes() == vid.read_bytes()
+    v.plan["max_bytes"] = 100
+    srv2 = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(ws / "m")))
+    threading.Thread(target=srv2.serve_forever, daemon=True).start()
+    v.plan["url"] = f"http://127.0.0.1:{srv2.server_port}/clip.mp4"; v.plan["path"] = str(ws / "dl" / "big.mp4")
+    r = ex.execute(v, 20, 1000, threading.Event()); srv2.shutdown()
+    assert r.status == "failed" and "size limit" in r.error and not (ws / "dl" / "big.mp4").exists()

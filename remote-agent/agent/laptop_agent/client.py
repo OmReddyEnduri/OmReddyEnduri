@@ -41,6 +41,12 @@ class RelayClient:
     def result(self, rid: str, payload: dict) -> dict:
         return self._req("POST", f"/api/v1/tasks/{rid}/result", json=payload)
 
+    def send_message(self, text: str) -> dict:
+        return self._req("POST", "/api/v1/agent/messages", json={"text": text})
+
+    def brain_messages(self, after_id: int) -> dict:
+        return self._req("GET", "/api/v1/agent/messages", params={"after_id": after_id, "limit": 20})
+
     def close(self) -> None:
         self._c.close()
 

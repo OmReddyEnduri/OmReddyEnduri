@@ -19,7 +19,7 @@ class Settings:
     lost_window_s: int = 90          # in-flight tasks fail after this much silence
     queue_ttl_s: int = 900           # queued tasks expire after this long
     max_output_bytes: int = 256 * 1024
-    max_args_bytes: int = 512 * 1024
+    max_args_bytes: int = 8 * 1024 * 1024
 
 
 def load_settings() -> Settings:

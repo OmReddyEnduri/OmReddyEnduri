@@ -62,6 +62,15 @@ class AuditLog(Base):
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class Message(Base):
+    __tablename__ = "messages"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    device_id: Mapped[str] = mapped_column(String(64), ForeignKey("devices.id"), index=True)
+    direction: Mapped[str] = mapped_column(String(8))  # "user" (laptop -> brain) | "brain" (brain -> laptop)
+    text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 def make_session_factory(url: str):
     kw = {"pool_pre_ping": True}
     if url.startswith("sqlite"):
