@@ -38,6 +38,17 @@ def cmd_init(a):
     print(f"Registered device {cfg.device_id}. Config saved to {p} (mode 600).")
 
 
+def cmd_workspace(a):
+    cfg = C.load()
+    cfg.workspaces = [os.path.abspath(os.path.expanduser(w)) for w in a.paths]
+    cfg.validate()
+    for w in cfg.workspaces:
+        os.makedirs(w, exist_ok=True)
+    C.save(cfg)
+    print("Approved workspaces now:", *cfg.workspaces, sep="\n  ")
+    print("Restart the agent for this to take effect.")
+
+
 def cmd_run(a):
     if is_privileged():
         sys.exit("Refusing to run as administrator/root. Start the agent as a normal user.")
@@ -75,6 +86,9 @@ def main():
     i.add_argument("--name")
     i.add_argument("--workspace", action="append")
     i.set_defaults(fn=cmd_init)
+    w = sub.add_parser("workspace", help="set the approved workspace folder(s), e.g. D:\\om")
+    w.add_argument("paths", nargs="+")
+    w.set_defaults(fn=cmd_workspace)
     r = sub.add_parser("run", help="start the agent")
     r.add_argument("--headless", action="store_true", help="no desktop window; console approvals")
     r.set_defaults(fn=cmd_run)

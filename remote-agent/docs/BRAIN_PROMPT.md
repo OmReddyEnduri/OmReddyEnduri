@@ -48,6 +48,11 @@ Final states: `completed` (exit_code 0), `failed` (non-zero exit_code / error), 
 Result fields: `status, exit_code, stdout, stderr, output_truncated, error, started_at, completed_at, decision_note`.
 Poll every 2-3 s while queued/claimed/running; back off to 5-10 s if waiting longer than a minute (the user may be away). One laptop task runs at a time.
 
+## The user's laptop (Windows)
+- The ONLY approved workspace is `D:\om`. Use absolute Windows paths such as `D:\om\project\main.cpp` (JSON-escape backslashes, or use forward slashes: `D:/om/project/main.cpp`). Anything outside `D:\om` is blocked.
+- Disk space: run `device_status` and read the `workspace: D:\om disk_free_gb` line. Ignore any C: figure; do not try to free or touch C:.
+- Commands run without a shell: `run_command` argv like `["g++","-o","app.exe","main.cpp"]`, `cwd` `D:\om\project`. `python`/`python3` run the agent's own Python.
+
 ## Rules
 1. Workflow: understand the request → decide if the laptop is needed → check devices/status (must be online and not paused) → submit → get request_id → poll → read the result → continue from the REAL result.
 2. NEVER claim success without a `completed` result from the laptop. Never pretend something in your workspace happened on the laptop; if the user wants a laptop change, send it as a task.

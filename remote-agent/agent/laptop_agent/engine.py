@@ -302,7 +302,7 @@ class AgentEngine:
         self._track(rid, status="running")
         self._term("run", f"{ttype} {rid}")
         res = execute(v, int(task.get("timeout_seconds", 60)), self.cfg.max_output_bytes, cancel,
-                      lambda tag, s: self._term(tag, s))
+                      lambda tag, s: self._term(tag, s), self.cfg.workspaces)
         payload = self._payload(res)
         self.audit.write("result", request_id=rid, status=res.status, exit_code=res.exit_code)
         self._track(rid, status=res.status, exit_code=res.exit_code, error=res.error)

@@ -78,14 +78,21 @@ class Policy:
             tail.insert(0, t)
         return os.path.join(os.path.realpath(head), *tail)
 
+    @staticmethod
+    def _within(real: str, root: str) -> bool:
+        try:  # different Windows drives raise ValueError; compare case-insensitively on Windows
+            return os.path.normcase(os.path.commonpath([real, root])) == os.path.normcase(root)
+        except ValueError:
+            return False
+
     def in_workspace(self, real: str) -> bool:
-        return any(os.path.commonpath([real, w]) == w for w in self.workspaces)
+        return any(self._within(real, w) for w in self.workspaces)
 
     def is_workspace_root(self, real: str) -> bool:
-        return real in self.workspaces
+        return os.path.normcase(real) in [os.path.normcase(w) for w in self.workspaces]
 
     def _touches_protected(self, real: str) -> bool:
-        return any(os.path.commonpath([real, p]) == p for p in self.protected)
+        return any(self._within(real, p) for p in self.protected)
 
     @staticmethod
     def _sensitive(real: str) -> bool:
@@ -221,11 +228,16 @@ class Policy:
                     raise PermissionError("argument references the agent's own configuration")
         return exe
 
+    @staticmethod
+    def _py(name: str) -> str:
+        import sys
+        return sys.executable if name in ("python", "python3", "py") else name
+
     def _c_run_command(self, v, a):
         cwd = self._cwd(v, a)
         argv = a.get("argv")
         exe = self._check_argv(argv, cwd)
-        v.plan = {"argv": argv, "cwd": cwd}
+        v.plan = {"argv": [self._py(argv[0]), *argv[1:]], "cwd": cwd}
         v.level = ASK
         v.impact = ("Runs a shell interpreter: arbitrary side effects possible." if exe in SHELLS
                     else "Runs a program inside the workspace; side effects depend on the program.")
@@ -246,7 +258,7 @@ class Policy:
         if not (isinstance(args, list) and all(isinstance(x, str) for x in args)):
             raise ValueError("args must be a list of strings")
         self._check_argv([interp, real, *args], cwd)
-        v.plan = {"argv": [interp, real, *args], "cwd": cwd}
+        v.plan = {"argv": [self._py(interp), real, *args], "cwd": cwd}
         v.files, v.level, v.preview = [real], ASK, text[:3000]
         v.impact = "Executes this script; it may create, change or delete files and use the network."
 
@@ -259,7 +271,7 @@ class Policy:
         if any(x.startswith("-") or "://" in x or x.startswith("git+") for x in pk):
             raise PermissionError("URL/VCS/option package specifiers are blocked")
         cwd = self._cwd(v, a)
-        argv = (["python3", "-m", "pip", "install", "--disable-pip-version-check", "--"] + pk) if mgr == "pip" \
+        argv = ([self._py("python3"), "-m", "pip", "install", "--disable-pip-version-check", "--"] + pk) if mgr == "pip" \
             else ["npm", "install", "--ignore-scripts", "--"] + pk
         v.plan = {"argv": argv, "cwd": cwd}
         v.level = ASK

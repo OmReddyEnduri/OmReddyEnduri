@@ -99,12 +99,13 @@ def run_process(argv, cwd, timeout, cap, cancel: threading.Event, on_output=None
     return r
 
 
-def execute(v: Verdict, task_timeout: int, cap: int, cancel: threading.Event, on_output=None) -> ExecResult:
+def execute(v: Verdict, task_timeout: int, cap: int, cancel: threading.Event, on_output=None,
+            workspaces=None) -> ExecResult:
     t = v.operation
     started = now()
     try:
         if t == "device_status":
-            return ExecResult(stdout=_status_text(), started=started)
+            return ExecResult(stdout=_status_text(workspaces or []), started=started)
         if t == "list_dir":
             entries = []
             with os.scandir(v.plan["path"]) as it:
@@ -151,12 +152,13 @@ def execute(v: Verdict, task_timeout: int, cap: int, cancel: threading.Event, on
         return ExecResult("failed", 1, error=f"{type(e).__name__}: {e}", started=started)
 
 
-def _status_text() -> str:
+def _status_text(workspaces) -> str:
     lines = [f"hostname: {socket.gethostname()}", f"os: {platform.platform()}",
              f"python: {sys.version.split()[0]}", f"cpus: {os.cpu_count()}", f"time: {now()}"]
-    try:
-        u = shutil.disk_usage(os.path.expanduser("~"))
-        lines.append(f"disk_free_gb: {u.free / 1e9:.1f}")
-    except OSError:
-        pass
+    for w in workspaces:
+        try:
+            u = shutil.disk_usage(w if os.path.exists(w) else os.path.dirname(w))
+            lines.append(f"workspace: {w}  disk_free_gb: {u.free / 1e9:.1f} of {u.total / 1e9:.1f}")
+        except OSError as e:
+            lines.append(f"workspace: {w}  (disk info unavailable: {e})")
     return "\n".join(lines)
