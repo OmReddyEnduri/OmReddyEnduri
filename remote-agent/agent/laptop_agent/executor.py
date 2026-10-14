@@ -317,15 +317,12 @@ def _read_image(plan: dict, started: str) -> ExecResult:
 
 def _video_frames(plan: dict, started: str, cancel) -> ExecResult:
     import base64
-    ff, fp = shutil.which("ffmpeg"), shutil.which("ffprobe")
-    if not ff or not fp:
-        return ExecResult("failed", 1, error="ffmpeg/ffprobe not found. Install ffmpeg (Windows: winget install Gyan.FFmpeg) and restart the agent.", started=started)
-    try:
-        dur = float(subprocess.run([fp, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", plan["path"]],
-                                   capture_output=True, text=True, timeout=30).stdout.strip() or 0)
-    except (subprocess.SubprocessError, ValueError, OSError) as e:
-        return ExecResult("failed", 1, error=f"ffprobe failed: {e}", started=started)
-    n = plan["count"]
+    from . import media_tools as mt
+    ff = mt.ffmpeg_path()
+    if not ff:
+        return ExecResult("failed", 1, error="ffmpeg not found. Run: pip install imageio-ffmpeg  (or install ffmpeg) and restart the agent.", started=started)
+    info = mt.probe(plan["path"])
+    dur, n = info["duration"], plan["count"]
     frames = []
     with tempfile.TemporaryDirectory() as td:
         for i in range(n):
@@ -333,9 +330,12 @@ def _video_frames(plan: dict, started: str, cancel) -> ExecResult:
                 return ExecResult("cancelled", None, error="cancelled", started=started)
             t = dur * (i + 0.5) / n if dur else 0
             out = os.path.join(td, f"f{i}.jpg")
-            r = subprocess.run([ff, "-v", "error", "-ss", f"{t:.2f}", "-i", plan["path"], "-frames:v", "1",
-                                "-vf", f"scale='min({plan['max_width']},iw)':-2", "-q:v", "5", out],
-                               capture_output=True, timeout=60)
+            try:
+                r = subprocess.run([ff, "-v", "error", "-ss", f"{t:.2f}", "-i", plan["path"], "-frames:v", "1",
+                                    "-vf", f"scale='min({plan['max_width']},iw)':-2", "-q:v", "5", out],
+                                   capture_output=True, timeout=60, **mt.NOWINDOW)
+            except (subprocess.SubprocessError, OSError):
+                continue
             if r.returncode == 0 and os.path.exists(out):
                 with open(out, "rb") as f:
                     frames.append({"t_seconds": round(t, 2), "image_mime": "image/jpeg",
@@ -343,7 +343,8 @@ def _video_frames(plan: dict, started: str, cancel) -> ExecResult:
     if not frames:
         return ExecResult("failed", 1, error="could not extract frames", started=started)
     return ExecResult(stdout=f"{len(frames)} frame(s) from {plan['path']} (duration {dur:.1f}s)", started=started,
-                      data={"path": plan["path"], "duration_seconds": dur, "frames": frames})
+                      data={"path": plan["path"], "duration_seconds": dur, "width": info["width"], "height": info["height"],
+                            "frames": frames})
 
 
 ALLOW_PRIVATE_DOWNLOADS = False   # tests only

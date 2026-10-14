@@ -24,7 +24,7 @@ class ScriptedApprover:
 @pytest.fixture
 def stack(tmp_path):
     s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
-    st = Settings(f"sqlite:///{tmp_path}/r.db", BRAIN, ADMIN, ENROLL, "", lost_window_s=90)
+    st = Settings(f"sqlite:///{tmp_path}/r.db", BRAIN, ADMIN, ENROLL, "u" * 32, lost_window_s=90, agent_online_s=3)
     srv = uvicorn.Server(uvicorn.Config(create_app(st), host="127.0.0.1", port=port, log_level="error"))
     th = threading.Thread(target=srv.run, daemon=True); th.start()
     url = f"http://127.0.0.1:{port}"
@@ -37,8 +37,10 @@ def stack(tmp_path):
     r = register(url, ENROLL, "test-laptop", {"os": "test"})
     cfg = Config(relay_url=url, device_id=r["device_id"], device_token=r["device_token"], workspaces=[str(ws)], security_level=3)
     appr = ScriptedApprover()
-    eng = AgentEngine(cfg, appr, Audit(cfg.secrets, tmp_path / "audit.log"))
+    from laptop_agent.store import ChatStore
+    eng = AgentEngine(cfg, appr, Audit(cfg.secrets, tmp_path / "audit.log"), ChatStore(tmp_path / "chats.db"))
     cfg.poll_interval_s, cfg.heartbeat_interval_s = 0.15, 0.3
+    cfg.sync_interval_s, cfg.ack_timeout_s = 0.25, 1.5
     brain = httpx.Client(base_url=url, headers={"Authorization": f"Bearer {BRAIN}"})
     eng.start()
     yield eng, brain, appr, cfg, ws, tmp_path
@@ -243,21 +245,6 @@ def test_level2_auto_creates_new_files_but_asks_to_overwrite(stack):
     assert (ws / "new.jsx").read_text() == "c"
 
 
-def test_chat_both_ways(stack):
-    eng, brain, appr, cfg, ws, _ = stack
-    assert eng.send_user_message("hello brain, can you hear me?")
-    deadline = time.time() + 10
-    while time.time() < deadline:
-        r = brain.get(f"/api/v1/messages?device_id={cfg.device_id}").json()
-        if r["messages"]: break
-        time.sleep(0.2)
-    assert [m["text"] for m in r["messages"]] == ["hello brain, can you hear me?"]
-    brain.post("/api/v1/messages", json={"device_id": cfg.device_id, "text": "loud and clear"})
-    deadline = time.time() + 10
-    while time.time() < deadline and not any(c["who"] == "brain" for c in eng.chat): time.sleep(0.2)
-    assert [c["text"] for c in eng.chat if c["who"] == "brain"] == ["loud and clear"]
-
-
 def test_binary_write_read_image_video_preview_download(stack, monkeypatch):
     import base64, io, subprocess, webbrowser, http.server, functools
     from PIL import Image
@@ -304,23 +291,132 @@ def test_binary_write_read_image_video_preview_download(stack, monkeypatch):
     assert r.status == "failed" and "size limit" in r.error and not (ws / "dl" / "big.mp4").exists()
 
 
-def test_channels_end_to_end(stack):
+# ------------------------------------------------------------------ multi-agent, through the real relay
+class FakeBrain:
+    """One LLM Arena window: registers with the relay (gets a NAME), long-polls its own inbox, replies."""
+    def __init__(self, brain, device_id):
+        self.b, self.dev, self.seen = brain, device_id, []
+        j = brain.post("/api/v1/agents/hello", json={}).json()
+        self.id, self.name = j["agent_id"], j["name"]
+
+    def poll(self, wait=0):
+        r = self.b.get(f"/api/v1/messages?device_id={self.dev}&agent_id={self.id}&wait={wait}").json()["messages"]
+        self.seen += r
+        return r
+
+    def say(self, channel, text, kind="msg"):
+        self.b.post("/api/v1/messages", json={"device_id": self.dev, "text": text, "channel": channel,
+                                              "agent_id": self.id, "kind": kind})
+
+    def until(self, pred, t=12):
+        end = time.time() + t
+        while time.time() < end:
+            for m in self.poll():
+                if pred(m): return m
+            time.sleep(0.2)
+        raise AssertionError(f"{self.name} never received the message; saw {[m['text'] for m in self.seen]}")
+
+
+def test_named_agents_chat_both_ways_with_context(stack):
     eng, brain, appr, cfg, ws, _ = stack
-    # a local-API conversation and an app conversation reach the Brain tagged with their own channel
-    assert eng.send_user_message("from the api", "local:toolA")
-    assert eng.send_user_message("from the app")
+    nova, atlas = FakeBrain(brain, cfg.device_id), FakeBrain(brain, cfg.device_id)
+    assert (nova.name, atlas.name) == ("Nova", "Atlas")
+    nova.poll(); atlas.poll()
+    time.sleep(0.6)
+    assert eng.send_user_message("@atlas hello, can you hear me?", "app")
+    m = atlas.until(lambda m: "hear me" in m["text"])
+    assert m["channel"] == "app" and m["context"]["you_are"]["name"] == "Atlas" and nova.poll() == []
+    atlas.say("app", "loud and clear")
+    atlas.say("app", "greeted the user; waiting for tasks", kind="notes")
     deadline = time.time() + 10
-    while time.time() < deadline:
-        msgs = brain.get(f"/api/v1/messages?device_id={cfg.device_id}&limit=50").json()["messages"]
-        if len(msgs) >= 2: break
-        time.sleep(0.2)
-    ch = {m["text"]: m["channel"] for m in msgs}
-    assert ch == {"from the api": "local:toolA", "from the app": "app"}
-    # the Brain answers each conversation separately (and one reply belongs to a relay-API caller)
-    for text, channel in (("to api", "local:toolA"), ("to app", "app"), ("to someone else", "relay:bob")):
-        brain.post("/api/v1/messages", json={"device_id": cfg.device_id, "text": text, "channel": channel})
-    deadline = time.time() + 10
-    while time.time() < deadline and sum(1 for c in eng.chat if c["who"] == "brain") < 2: time.sleep(0.2)
+    while time.time() < deadline and not any(c["who"] == "brain" for c in eng.chat): time.sleep(0.2); atlas.poll()
+    row = next(c for c in eng.chat if c["who"] == "brain")
+    assert (row["text"], row["agent"], row["channel"]) == ("loud and clear", "atlas", "app")
     time.sleep(0.8)
-    got = {(c["text"], c["channel"]) for c in eng.chat if c["who"] == "brain"}
-    assert got == {("to api", "local:toolA"), ("to app", "app")}        # relay:bob's reply never lands on the laptop
+    assert eng.store.chat("app")["notes"] == "greeted the user; waiting for tasks"          # context lives on the laptop
+    # the next message carries that context to whoever receives it
+    eng.send_user_message("what did we just do?", "app")
+    m2 = atlas.until(lambda m: "just do" in m["text"])
+    assert m2["context"]["notes"] == "greeted the user; waiting for tasks"
+    assert [x["text"] for x in m2["context"]["recent_messages"]][-2:] == ["@atlas hello, can you hear me?", "loud and clear"]
+
+
+def test_failover_to_another_agent_with_the_same_context_end_to_end(stack):
+    eng, brain, appr, cfg, ws, _ = stack
+    nova, atlas = FakeBrain(brain, cfg.device_id), FakeBrain(brain, cfg.device_id)
+    nova.poll(); atlas.poll(); time.sleep(0.6)
+    eng.store.ensure_chat("app:site", "Landing page"); eng.store.set_notes("app:site", "index.html done; pricing next", "nova")
+    eng.router.pin("app:site", "nova")
+    eng.send_user_message("add a pricing section", "app:site")
+    # Nova never polls again (her window died): after the ack timeout the middle guy hands the chat to Atlas
+    m = atlas.until(lambda m: "pricing section" in m["text"], t=15)
+    assert m["context"]["notes"] == "index.html done; pricing next"
+    assert m["context"]["handoff"]["from"] == "Nova" and m["context"]["handoff"]["to"] == "Atlas"
+    assert nova.poll() == []                                                # retracted: Nova can never act on it late
+    assert any("Handed over to Atlas" in x["text"] for x in eng.store.messages("app:site") if x["who"] == "sys")
+    atlas.say("app:site", "added pricing", kind="msg")
+    deadline = time.time() + 8
+    while time.time() < deadline and eng.store.chat("app:site")["assigned"] != "atlas": time.sleep(0.2); atlas.poll()
+    assert eng.store.chat("app:site")["assigned"] == "atlas"
+
+
+def test_two_chats_two_agents_stay_separate_and_relay_api_is_routed_by_the_laptop(stack):
+    eng, brain, appr, cfg, ws, _ = stack
+    nova, atlas = FakeBrain(brain, cfg.device_id), FakeBrain(brain, cfg.device_id)
+    nova.poll(); atlas.poll(); time.sleep(0.6)
+    eng.send_user_message("@nova chat one", "app:one"); eng.send_user_message("@atlas chat two", "app:two")
+    assert nova.until(lambda m: "chat one" in m["text"])["channel"] == "app:one"
+    assert atlas.until(lambda m: "chat two" in m["text"])["channel"] == "app:two"
+    assert not any("chat two" in m["text"] for m in nova.seen) and not any("chat one" in m["text"] for m in atlas.seen)
+    # an outside caller of the relay chat API: the LAPTOP decides who answers (here: asked for Atlas by name)
+    U = {"Authorization": "Bearer " + "u" * 32}
+    r = httpx.post(cfg.relay_url + "/api/v1/chat", headers=U, json={"text": "@atlas who am I talking to?", "wait": 0, "chat_id": "z"})
+    assert r.status_code == 201
+    m = atlas.until(lambda m: "who am I" in m["text"], t=15)
+    assert m["channel"] == "relay:z" and m["context"]["you_are"]["name"] == "Atlas"
+    atlas.say("relay:z", "You are talking to Atlas.")
+    r = httpx.post(cfg.relay_url + "/api/v1/chat", headers=U, json={"text": "thanks", "wait": 0, "chat_id": "z"})
+    time.sleep(0.5)
+    hist = httpx.get(cfg.relay_url + "/api/v1/chat?chat_id=z", headers=U).json()["messages"]
+    assert "You are talking to Atlas." in [h["text"] for h in hist]
+    assert [x["text"] for x in eng.store.messages("relay:z") if x["who"] == "you"][0] == "@atlas who am I talking to?"   # context on the laptop
+    # STOP reaches every agent
+    eng.send_user_message("stop", "app:one")
+    assert nova.until(lambda m: m["text"] == "stop")["context"]["stop"] is True
+    assert atlas.until(lambda m: m["text"] == "stop")["context"]["stop"] is True
+
+
+def test_task_events_are_kept_in_the_chat_context(stack):
+    eng, brain, appr, cfg, ws, _ = stack
+    eng.set_security_level(1)
+    brain.post("/api/v1/tasks", json={"request_id": "ev-1", "device_id": cfg.device_id, "task_type": "write_file",
+                                      "arguments": {"path": str(ws / "a.txt"), "content": "x"}, "reason": "make a",
+                                      "timeout_seconds": 20, "agent_id": "nova", "channel": "app:site"})
+    wait(brain, "ev-1")
+    ev = [e["text"] for e in eng.store.events("app:site")]
+    assert any("requested write_file (ev-1)" in e for e in ev) and any("write_file (ev-1) -> completed" in e for e in ev)
+    assert next(t for t in eng.snapshot()["tasks"] if t["request_id"] == "ev-1")["agent"] == "nova"
+
+
+def test_photos_and_videos_from_agents_land_in_the_media_library_and_chat(stack, monkeypatch):
+    import base64, io, subprocess, webbrowser
+    monkeypatch.setattr(webbrowser, "open", lambda u: True)        # headless test: the real app shows previews in its own window
+    from PIL import Image
+    from laptop_agent import media_tools as mt
+    eng, brain, appr, cfg, ws, _ = stack
+    eng.set_security_level(1)
+    buf = io.BytesIO(); Image.new("RGB", (400, 300), (30, 120, 220)).save(buf, "PNG")
+    brain.post("/api/v1/tasks", json={"request_id": "m-1", "device_id": cfg.device_id, "task_type": "write_file",
+               "arguments": {"path": str(ws / "gen" / "logo.png"), "encoding": "base64", "content": base64.b64encode(buf.getvalue()).decode()},
+               "reason": "send you a photo", "timeout_seconds": 20, "agent_id": "nova", "channel": "app:site"})
+    assert wait(brain, "m-1")["status"] == "completed"
+    vid = ws / "gen" / "clip.mp4"
+    subprocess.run([mt.ffmpeg_path(), "-v", "error", "-f", "lavfi", "-i", "testsrc=duration=1:size=160x120:rate=10", "-pix_fmt", "yuv420p", str(vid)], check=True)
+    brain.post("/api/v1/tasks", json={"request_id": "m-2", "device_id": cfg.device_id, "task_type": "open_preview",
+               "arguments": {"path": str(vid)}, "reason": "show you the clip", "timeout_seconds": 20, "agent_id": "nova", "channel": "app:site"})
+    wait(brain, "m-2")
+    media = {m["path"]: m for m in eng.store.media()}
+    assert media[str(ws / "gen" / "logo.png")]["kind"] == "image" and media[str(ws / "gen" / "logo.png")]["agent"] == "nova"
+    assert media[str(vid)]["source"] == "open_preview"
+    chat = [m for m in eng.store.messages("app:site") if m["who"] == "media"]
+    assert [m["text"] for m in chat] == [str(ws / "gen" / "logo.png")] and chat[0]["agent"] == "nova"   # photo shows in the chat; previews do not

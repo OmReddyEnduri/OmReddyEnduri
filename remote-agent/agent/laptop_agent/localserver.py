@@ -169,7 +169,10 @@ def create_local_app(engine: AgentEngine, secret: str, port: int) -> FastAPI:
     @app.get("/v1/models")
     def v1_models(request: Request):
         v1_guard(request)
-        return {"object": "list", "data": [{"id": "brain", "object": "model", "owned_by": "laptop-agent"}]}
+        data = [{"id": "brain", "object": "model", "owned_by": "laptop-agent"}]      # "brain" = the router picks the agent
+        data += [{"id": a["name"].lower(), "object": "model", "owned_by": "laptop-agent",
+                  "online": bool(a.get("online"))} for a in engine.router.agents.values()]   # or call one by name
+        return {"object": "list", "data": data}
 
     @app.post("/v1/chat/completions")
     async def v1_chat(request: Request):
@@ -192,7 +195,12 @@ def create_local_app(engine: AgentEngine, secret: str, port: int) -> FastAPI:
         t0 = time.time()
         if not engine.send_user_message(text, channel):
             raise HTTPException(503, "agent is not connected to the relay")
-        reply = await _await_reply(engine, t0, wait, channel)
+        wanted = str(body.get("model") or "brain").lower()
+        if wanted != "brain":                          # model = an agent's name: call that agent for this chat
+            target = engine.router.find(wanted)
+            if target:
+                engine.router.pin(channel, target)
+        reply, who = await _await_reply(engine, t0, wait, channel)
         out = reply or "(delivered to the Brain; no reply yet - it will appear in the app chat)"
         cid, now = f"chatcmpl-{secrets.token_hex(6)}", int(time.time())
         if body.get("stream"):
@@ -204,13 +212,14 @@ def create_local_app(engine: AgentEngine, secret: str, port: int) -> FastAPI:
                 yield "data: [DONE]\n\n"
             return StreamingResponse(gen(), media_type="text/event-stream")
         return {"id": cid, "object": "chat.completion", "created": now, "model": "brain",
-                "choices": [{"index": 0, "message": {"role": "assistant", "content": out}, "finish_reason": "stop"}],
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": out, **({"name": who} if who else {})},
+                             "finish_reason": "stop"}],
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}
 
     return app
 
 
-async def _await_reply(engine: AgentEngine, t0: float, wait: int, channel: str) -> str:
+async def _await_reply(engine: AgentEngine, t0: float, wait: int, channel: str) -> tuple[str, str | None]:
     import asyncio
     end = time.time() + wait
     while time.time() < end:
@@ -218,9 +227,10 @@ async def _await_reply(engine: AgentEngine, t0: float, wait: int, channel: str) 
         if new:
             await asyncio.sleep(1.5)       # let a multi-part reply finish arriving
             new = [c for c in list(engine.chat) if c["who"] == "brain" and c["ts"] > t0 and c.get("channel") == channel]
-            return "\n\n".join(c["text"] for c in new)
+            who = next((engine.router.name_of(c["agent"]) for c in new if c.get("agent")), None)
+            return "\n\n".join(c["text"] for c in new), who
         await asyncio.sleep(0.3)
-    return ""
+    return "", None
 
 
 class LocalServer:

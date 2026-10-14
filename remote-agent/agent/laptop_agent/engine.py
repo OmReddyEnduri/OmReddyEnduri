@@ -1,4 +1,5 @@
 """Agent engine: heartbeat + poll threads, approval flow, execution, result delivery."""
+import os
 import random
 import threading
 import time
@@ -14,6 +15,9 @@ from .config import Config
 from .executor import ExecResult, execute
 from .policy import ASK, AUTO, BLOCK, Policy, Verdict
 from .redact import redact
+from . import media_tools
+from .router import Router
+from .store import ChatStore
 
 STOPPED, CONNECTED, RECONNECTING, PAUSED, DISCONNECTED, AUTH_FAILED = (
     "stopped", "connected", "reconnecting", "paused", "disconnected", "auth_failed")
@@ -52,11 +56,13 @@ class Backoff:
 
 
 class AgentEngine:
-    def __init__(self, cfg: Config, approver: Approver, audit: Audit | None = None):
+    def __init__(self, cfg: Config, approver: Approver, audit: Audit | None = None, store: ChatStore | None = None):
         cfg.validate()
         self.cfg, self.approver = cfg, approver
         self.audit = audit or Audit(cfg.secrets)
         self.policy = Policy(cfg.workspaces, cfg.security_level)
+        self.store = store or ChatStore()          # chat context: LOCAL ONLY (this laptop)
+        self.router = Router(self, self.store)     # the middle guy: picks agents, keeps context, fails over
         self.state = STOPPED
         self.paused = False
         self.active: str | None = None
@@ -238,43 +244,50 @@ class AgentEngine:
 
     # -------------------------------------------------------------------- chat
     def send_user_message(self, text: str, channel: str = "app") -> bool:
-        """Text typed by the user (or a local API client) -> relay -> Brain, tagged with its conversation
-        `channel`. Text only; never executes anything."""
-        text = (text or "").strip()[:4000]
-        if not text or not self._client or self._stop.is_set():
+        """Text typed by the user (or a local API client). The router picks the agent, attaches this chat's context
+        and delivers it. Text only: never executes anything on this laptop."""
+        if not (text or "").strip() or not self._client or self._stop.is_set():
             return False
-        self._add_chat("you", text, channel)
+        return self.router.route_user_message(text[:4000], channel)
 
-        def post():
-            try:
-                self._client.send_message(text, channel)
-            except Exception as e:
-                self.notify("warning", f"Message not delivered to the Brain: {e}")
-        threading.Thread(target=post, daemon=True).start()
-        return True
-
-    def _add_chat(self, who: str, text: str, channel: str = "app"):
-        row = {"who": who, "text": text, "ts": time.time(), "channel": channel}
+    def _add_chat(self, who: str, text: str, channel: str = "app", agent: str | None = None):
+        row = {"who": who, "text": text, "ts": time.time(), "channel": channel, "agent": agent}
         self.chat.append(row)
         self._emit("chat", row)
 
     def _chat_loop(self):
         while not self._stop.is_set():
             try:
-                r = self._client.brain_messages(self._chat_last)
-                for m in r.get("messages", []):
-                    ch = m.get("channel", "app")
-                    if ch == "app" or ch.startswith(("app:", "local:")):   # relay:* replies belong to relay API callers
-                        self._add_chat("brain", m["text"], ch)
-                        self.audit.write("brain_message", channel=ch, text=m["text"][:200])
-                self._chat_last = r.get("last_id", self._chat_last)
-                self._stop.wait(2.5)
+                self.router.sync_once()
+                self._emit("agents", None)
+                self._stop.wait(self.cfg.sync_interval_s)
             except RelayError as e:
                 if e.permanent:
                     return
                 self._stop.wait(5)
             except httpx.HTTPError:
                 self._stop.wait(5)
+            except Exception as e:           # a router bug must never kill the loop
+                self.audit.write("router_error", error=f"{type(e).__name__}: {e}")
+                self._stop.wait(5)
+
+    # ------------------------------------------------------- multi-agent UI actions
+    def pin_chat(self, channel: str, agent_id: str | None):
+        self.router.pin(channel, agent_id)
+        self.audit.write("chat_pinned", channel=channel, agent=agent_id)
+
+    def reassign_chat(self, channel: str):
+        self.router.reassign(channel)
+        self.audit.write("chat_reassigned", channel=channel)
+
+    def rename_agent(self, agent_id: str, name: str):
+        def go():
+            try:
+                self._client.rename_agent(agent_id, name)
+                self.router.agents.get(agent_id, {})["name"] = name
+            except Exception as e:
+                self.notify("warning", f"Could not rename the agent: {e}")
+        threading.Thread(target=go, daemon=True).start()
 
     def _auth_failed(self, e):
         self.notify("error", f"Relay rejected this device ({e}). Token revoked or wrong. Disconnecting.")
@@ -314,8 +327,12 @@ class AgentEngine:
         cancel = self._cancel.setdefault(rid, threading.Event())
         ttype, args = task.get("task_type", ""), task.get("arguments") or {}
         self.audit.write("task_received", request_id=rid, task_type=ttype, reason=task.get("reason"))
+        ch, ag = task.get("channel") or "app", task.get("agent_id")
+        self.store.ensure_chat(ch)
+        self.store.add_event(ch, "task", f"requested {ttype} ({rid}): {task.get('reason', '')[:100]}", ag)
+        self.router.note_activity(ch, ag)
         self._track(rid, task_type=ttype, reason=task.get("reason", ""), status="received",
-                    arguments=args)
+                    arguments=args, agent=ag, channel=ch)
         v = self.policy.classify(ttype, args)
         self._track(rid, risk=v.level, status="classified")
 
@@ -323,6 +340,7 @@ class AgentEngine:
             note = "; ".join(v.reasons)
             self._deliver("decision", self._client.decision, rid, "blocked", "block", note)
             self._track(rid, status="blocked", note=note)
+            self.store.add_event(ch, "blocked", f"{ttype} ({rid}) blocked by the laptop: {note[:200]}", ag)
             self.notify("warning", f"BLOCKED {ttype} ({rid}): {note}")
             self.audit.write("blocked", request_id=rid, reasons=v.reasons)
             return
@@ -339,6 +357,7 @@ class AgentEngine:
                 dec = "rejected" if answer == "reject" else "cancelled"
                 self._deliver("decision", self._client.decision, rid, dec, "ask", f"user:{answer}")
                 self._track(rid, status=dec)
+                self.store.add_event(ch, dec, f"{ttype} ({rid}) {dec} by the user", ag)
                 return
             v2 = self.policy.classify(ttype, args)  # re-verify: state may have changed while waiting
             if v2.level == BLOCK or v2.plan != v.plan:
@@ -367,8 +386,33 @@ class AgentEngine:
         payload = self._payload(res)
         self.audit.write("result", request_id=rid, status=res.status, exit_code=res.exit_code)
         self._track(rid, status=res.status, exit_code=res.exit_code, error=res.error)
+        detail = (res.error or res.stdout or "").strip().replace("\n", " ")[:120]
+        self.store.add_event(ch, "result", f"{ttype} ({rid}) -> {res.status}" + (f": {detail}" if detail else ""), ag)
+        self.router.note_activity(ch, ag)
+        if res.status == "completed":
+            try:
+                self._collect_media(ttype, v.plan, ch, ag)
+            except Exception as e:
+                self.audit.write("media_error", error=str(e))
         if not self._deliver("result", self._client.result, rid, payload) and not self._stop.is_set():
             self.notify("error", f"Could not deliver result for {rid}")
+
+    def _collect_media(self, ttype: str, plan: dict, ch: str, ag: str | None):
+        """Photos/videos an agent wrote to this laptop go into the media library and show up in the chat."""
+        paths = []
+        if ttype in ("write_file", "screenshot", "download_file", "open_preview"):
+            paths = [plan.get("path")]
+        elif ttype == "write_files":
+            paths = [f["path"] for f in plan.get("files", [])]
+        for p in filter(None, paths):
+            kind = media_tools.kind_of(p)
+            if kind not in ("image", "video") or not os.path.isfile(p):
+                continue
+            row = self.store.add_media(p, kind, ag, ch, ttype)
+            self._emit("media", row)
+            if ttype != "open_preview":
+                self.store.add_message(ch, "media", p, agent=ag)
+                self._add_chat("media", p, ch, ag)
 
     def _payload(self, r: ExecResult) -> dict:
         sec = self.cfg.secrets
@@ -382,7 +426,8 @@ class AgentEngine:
     # -------------------------------------------------------------- UI snapshot
     def snapshot(self) -> dict:
         return {"state": self.state, "paused": self.paused, "active": self.active,
-                "relay_url": self.cfg.relay_url, "security_level": self.policy.level, "device_id": self.cfg.device_id,
+                "relay_url": self.cfg.relay_url, "security_level": self.policy.level,
+                "agents": list(self.router.agents.values()), "chats": self.store.chats(), "device_id": self.cfg.device_id,
                 "workspaces": self.cfg.workspaces, "last_error": self.last_error,
                 "tasks": [{k: v for k, v in t.items() if k != "arguments"} for t in list(self.tasks)[:100]],
                 "terminal": list(self.terminal)[-300:], "chat": list(self.chat)[-200:], "notices": list(self.notices)[:50]}

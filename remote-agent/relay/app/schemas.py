@@ -18,6 +18,8 @@ class TaskCreate(BaseModel):
     arguments: dict[str, Any] = Field(default_factory=dict)
     reason: str = Field(min_length=1, max_length=2000)
     timeout_seconds: int = Field(default=60, ge=1, le=3600)
+    agent_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,64}$")   # which agent submitted it
+    channel: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,64}$")    # which chat it is for
 
     @field_validator("request_id")
     @classmethod
@@ -58,12 +60,16 @@ class Result(BaseModel):
 class UserMessage(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
     channel: str = Field(default="app", pattern=r"^[A-Za-z0-9_.:-]{1,64}$")
+    to_agent: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,64}$")   # set by the laptop router
+    context: dict | None = None                                                       # context packet for that agent
 
 
 class BrainMessage(BaseModel):
     device_id: str
     text: str = Field(min_length=1, max_length=4000)
     channel: str = Field(default="app", pattern=r"^[A-Za-z0-9_.:-]{1,64}$")  # reply goes ONLY to this conversation
+    agent_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,64}$")  # which agent is replying
+    kind: Literal["msg", "notes"] = "msg"   # "notes" = context notes for the laptop's chat memory (not shown as a chat message)
 
 
 class ChatIn(BaseModel):
@@ -104,3 +110,21 @@ class MemoryIn(BaseModel):
         if isinstance(v, (list, tuple)):
             v = ", ".join(str(x) for x in v)
         return str(v)[:200]
+
+
+class AgentHello(BaseModel):
+    """Register / check in. Send {} to be given a free name by the relay (e.g. "Nova"); send `agent_id` to resume
+    an identity you already have; send `claim` ("Nova") to take over a name whose agent is offline."""
+    agent_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,64}$")
+    claim: str | None = Field(default=None, max_length=40)
+    name: str = Field(default="", max_length=40)
+    info: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentRename(BaseModel):
+    name: str = Field(min_length=1, max_length=40, pattern=r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,39}$")
+
+
+class RouteIn(BaseModel):
+    to_agent: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,64}$")
+    context: dict | None = None

@@ -49,6 +49,8 @@ class Task(Base):
     output_truncated: Mapped[bool] = mapped_column(Boolean, default=False)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     result_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    agent_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    channel: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class AuditLog(Base):
@@ -68,7 +70,24 @@ class Message(Base):
     device_id: Mapped[str] = mapped_column(String(64), ForeignKey("devices.id"), index=True)
     direction: Mapped[str] = mapped_column(String(8))  # "user" (laptop -> brain) | "brain" (brain -> laptop)
     channel: Mapped[str] = mapped_column(String(64), default="app", server_default="app", index=True)
+    to_agent: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)   # addressed to this agent (None = unrouted)
+    from_agent: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    msg_kind: Mapped[str] = mapped_column(String(12), default="msg")                      # msg | notes (context notes for the laptop)
+    context: Mapped[dict | None] = mapped_column(JSON, nullable=True)                     # context packet built by the laptop router (transient)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    delivered_to: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    cancelled: Mapped[bool] = mapped_column(Boolean, default=False)
     text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Agent(Base):
+    """A Brain instance (one LLM Arena window). The laptop router decides which agent handles which chat."""
+    __tablename__ = "agents"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), default="")
+    info: Mapped[dict] = mapped_column(JSON, default=dict)
+    last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -87,13 +106,29 @@ class Memory(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+# columns added after the first deploy: create_all never alters existing tables
+_NEW_COLUMNS = {
+    "messages": {"channel": "VARCHAR(64) NOT NULL DEFAULT 'app'", "to_agent": "VARCHAR(64)", "from_agent": "VARCHAR(64)",
+                 "msg_kind": "VARCHAR(12) NOT NULL DEFAULT 'msg'", "context": "JSON", "delivered_at": "{ts}",
+                 "delivered_to": "VARCHAR(64)", "cancelled": "BOOLEAN NOT NULL DEFAULT FALSE"},
+    "tasks": {"agent_id": "VARCHAR(64)", "channel": "VARCHAR(64)"},
+}
+
+
 def _ensure_columns(engine) -> None:
-    """create_all never alters existing tables: add columns introduced after the first deploy."""
-    cols = {c["name"] for c in inspect(engine).get_columns("messages")}
-    if "channel" not in cols:
-        with engine.begin() as cx:
-            cx.execute(text("ALTER TABLE messages ADD COLUMN channel VARCHAR(64) NOT NULL DEFAULT 'app'"))
-            cx.execute(text("CREATE INDEX IF NOT EXISTS ix_messages_channel ON messages (channel)"))
+    insp = inspect(engine)
+    ts = "TIMESTAMP WITH TIME ZONE" if engine.dialect.name == "postgresql" else "DATETIME"
+    for table, cols in _NEW_COLUMNS.items():
+        if table not in insp.get_table_names():
+            continue
+        have = {c["name"] for c in insp.get_columns(table)}
+        for name, ddl in cols.items():
+            if name not in have:
+                with engine.begin() as cx:
+                    cx.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl.replace('{ts}', ts)}"))
+    with engine.begin() as cx:
+        cx.execute(text("CREATE INDEX IF NOT EXISTS ix_messages_channel ON messages (channel)"))
+        cx.execute(text("CREATE INDEX IF NOT EXISTS ix_messages_to_agent ON messages (to_agent)"))
 
 
 def make_session_factory(url: str):

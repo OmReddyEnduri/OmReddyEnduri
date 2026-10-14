@@ -41,8 +41,26 @@ class RelayClient:
     def result(self, rid: str, payload: dict) -> dict:
         return self._req("POST", f"/api/v1/tasks/{rid}/result", json=payload)
 
-    def send_message(self, text: str, channel: str = "app") -> dict:
-        return self._req("POST", "/api/v1/agent/messages", json={"text": text, "channel": channel})
+    def send_message(self, text: str, channel: str = "app", to_agent: str | None = None,
+                     context: dict | None = None) -> dict:
+        body = {"text": text, "channel": channel}
+        if to_agent:
+            body["to_agent"] = to_agent
+        if context is not None:
+            body["context"] = context
+        return self._req("POST", "/api/v1/agent/messages", json=body)
+
+    def sync(self, after_id: int) -> dict:
+        return self._req("GET", "/api/v1/agent/sync", params={"after_id": after_id, "limit": 50})
+
+    def route_message(self, msg_id: int, to_agent: str, context: dict | None) -> dict:
+        return self._req("POST", f"/api/v1/agent/messages/{msg_id}/route", json={"to_agent": to_agent, "context": context})
+
+    def cancel_message(self, msg_id: int) -> dict:
+        return self._req("POST", f"/api/v1/agent/messages/{msg_id}/cancel")
+
+    def rename_agent(self, agent_id: str, name: str) -> dict:
+        return self._req("POST", f"/api/v1/agent/agents/{agent_id}/rename", json={"name": name})
 
     def brain_messages(self, after_id: int) -> dict:
         return self._req("GET", "/api/v1/agent/messages", params={"after_id": after_id, "limit": 20})

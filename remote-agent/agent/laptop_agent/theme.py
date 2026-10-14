@@ -11,6 +11,14 @@ STATUS_COLORS = {
 }
 
 QSS = f"""
+QFrame#bubbleYou {{ background: {ACCENT}; border-radius: 14px; }}
+QFrame#bubbleBrain {{ background: {CARD2}; border: 1px solid {BORDER}; border-radius: 14px; }}
+QLabel#sysline {{ color: {MUTED}; font-size: 12px; }}
+QLabel#bubbleText {{ background: transparent; }}
+QComboBox {{ background: {CARD2}; border: 1px solid {BORDER}; border-radius: 8px; padding: 7px 12px; min-height: 18px; }}
+QComboBox:hover {{ border-color: {ACCENT}; }}
+QComboBox::drop-down {{ border: none; width: 24px; }}
+QComboBox QAbstractItemView {{ background: {CARD}; border: 1px solid {BORDER}; selection-background-color: {CARD2}; outline: 0; padding: 4px; }}
 QListWidget {{ background: #0a0f14; border: 1px solid {BORDER}; border-radius: 10px; padding: 6px; outline: 0; }}
 QListWidget::item {{ padding: 11px 12px; border-radius: 8px; color: {TEXT}; margin-bottom: 2px; }}
 QListWidget::item:hover {{ background: {CARD}; }}

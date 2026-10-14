@@ -59,6 +59,13 @@ Exponential backoff + jitter, bounded output (128 KB) with `output_truncated`, s
 - **Memory:** the Brain keeps notes, preferences, skills and lessons in the relay (`/api/v1/memory*`). Blocked, rejected and failed tasks are recorded as lessons automatically. View/delete entries on the dashboard's Memory tab.
 - **Previews** open in the app's Preview tab (images, text, markdown, basic HTML). Full JavaScript pages, video and PDF need `pip install PySide6-Addons` (large, ~200+ MB).
 
+## Multi-agent
+- Run the Brain prompt in several LLM Arena windows. Each registers with the relay and gets a **name** (Nova, Atlas, Echo, ...). Call one with `@nova ...` in any chat.
+- The **laptop app is the router**: it picks the agent per chat (sticky, load-balanced), and if an agent goes offline or does not pick a message up within 30 s it retracts the message and hands the chat to another agent **with the same context**.
+- **Chat context lives only on your laptop** (`chats.db` in the app's config folder: history, notes the agents write, task events, hand-over log). The relay only holds short-lived messages (deleted after 1 h) and tasks (after 48 h).
+- Shared Brain memory (lessons, skills, preferences) stays on the relay.
+- **Preview** tab: library of every photo/video the agents send, viewer with details, and an in-app video player (needs ffmpeg: `pip install imageio-ffmpeg`; silent).
+
 ## Tests
 ```
 cd relay && pip install -r requirements.txt && pytest -q

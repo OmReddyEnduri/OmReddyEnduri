@@ -5,20 +5,21 @@ HTTPS + DB-backed polling only; no WebSockets, no inbound laptop port.
 import asyncio
 import contextlib
 import json
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from . import schemas
 from .auth import (get_db, hash_token, new_device_token, require_admin, require_brain,
                    require_device, require_enroll, require_user)
 from .config import Settings, load_settings
-from .db import AuditLog, Device, Memory, Message, Task, make_session_factory, utcnow
+from .db import Agent, AuditLog, Device, Memory, Message, Task, make_session_factory, utcnow
 
 TERMINAL = {"completed", "failed", "timeout", "cancelled", "rejected", "blocked", "expired"}
 INFLIGHT = ("claimed", "running")
@@ -61,7 +62,7 @@ def task_json(t: Task, full: bool = True) -> dict:
          "claimed_at": iso(t.claimed_at), "decided_at": iso(t.decided_at),
          "started_at": iso(t.started_at), "completed_at": iso(t.completed_at),
          "exit_code": t.exit_code, "cancel_requested": t.cancel_requested,
-         "decision_note": t.decision_note, "error": t.error}
+         "decision_note": t.decision_note, "error": t.error, "agent_id": t.agent_id, "channel": t.channel}
     if full:
         d.update(arguments=t.arguments, stdout=t.stdout, stderr=t.stderr,
                  output_truncated=t.output_truncated, data=t.result_data)
@@ -133,12 +134,30 @@ def sweep(db: Session, s: Settings) -> None:
         db.commit()
 
 
+AGENT_NAMES = ["Nova", "Atlas", "Echo", "Orion", "Luna", "Sage", "Iris", "Kai", "Zephyr", "Juno", "Cleo", "Rex",
+               "Milo", "Ivy", "Axel", "Piper", "Finn", "Ruby", "Otto", "Skye"]
+
+
+def purge(db: Session, s: Settings) -> None:
+    """The relay is a transit buffer, not a store: chat context lives on the laptop. Old messages/tasks go away."""
+    now = utcnow()
+    msg_cut = now - timedelta(seconds=s.message_ttl_s)
+    db.execute(delete(Message).where(
+        Message.created_at < msg_cut,
+        Message.delivered_at.is_not(None) | Message.cancelled.is_(True) | (Message.direction == "brain")))
+    db.execute(delete(Message).where(Message.created_at < now - timedelta(hours=24)))      # never-delivered leftovers
+    db.execute(delete(Task).where(Task.status.in_(tuple(TERMINAL)), Task.completed_at < now - timedelta(hours=s.task_ttl_h)))
+    db.execute(delete(AuditLog).where(AuditLog.ts < now - timedelta(days=14)))
+    db.commit()
+
+
 async def _sweeper(app: FastAPI):
     while True:
         await asyncio.sleep(15)
         try:
             with app.state.Session() as db:
                 await asyncio.to_thread(sweep, db, app.state.settings)
+                await asyncio.to_thread(purge, db, app.state.settings)
         except Exception:  # keep the loop alive
             pass
 
@@ -229,7 +248,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(409, "request_id already used with different content")
             return JSONResponse(task_json(existing), status_code=200)  # idempotent replay
         t = Task(request_id=body.request_id, device_id=body.device_id, task_type=body.task_type,
-                 arguments=body.arguments, reason=body.reason, timeout_seconds=body.timeout_seconds)
+                 arguments=body.arguments, reason=body.reason, timeout_seconds=body.timeout_seconds,
+                 agent_id=body.agent_id, channel=body.channel)
         db.add(t)
         audit(db, "brain", "task_submitted", t.request_id, t.device_id, t.task_type)
         db.commit()
@@ -355,6 +375,86 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         db.commit()
         return task_json(t, full=False)
 
+    # ---------------------------------------------------------------- agents
+    def agent_json(a: Agent) -> dict:
+        ls = aware(a.last_seen)
+        online = bool(ls) and (utcnow() - ls).total_seconds() <= settings.agent_online_s
+        return {"agent_id": a.id, "name": a.name, "online": online, "last_seen": iso(a.last_seen), "info": a.info or {}}
+
+    def slug(name: str) -> str:
+        return re.sub(r"[^a-z0-9_.-]", "", name.lower())[:60] or "agent"
+
+    def touch_agent(db: Session, agent_id: str) -> Agent:
+        a = db.get(Agent, agent_id)
+        if a is None:   # an id we have not seen calling in: register it so the router can address it
+            a = Agent(id=agent_id, name=_unique_name(db, agent_id.title()))
+            db.add(a)
+        a.last_seen = utcnow()
+        return a
+
+    def _unique_name(db: Session, name: str, except_id: str | None = None) -> str:
+        taken = {x.name.lower() for x in db.scalars(select(Agent)) if x.id != except_id}
+        cand, n = name, 2
+        while cand.lower() in taken:
+            cand, n = f"{name}{n}", n + 1
+        return cand
+
+    @app.post("/api/v1/agents/hello")
+    def agent_hello(body: schemas.AgentHello, db: Session = Depends(get_db), _=Depends(require_brain)):
+        """Check in. The relay gives every agent a NAME so the user can call it up ("@nova ...")."""
+        agents = db.scalars(select(Agent)).all()
+        a = None
+        if body.agent_id:
+            a = db.get(Agent, body.agent_id)
+            if a is None:
+                a = Agent(id=body.agent_id, name=_unique_name(db, body.name or body.agent_id.title()))
+                db.add(a)
+        elif body.claim:
+            c = body.claim.strip().lower()
+            a = next((x for x in agents if x.name.lower() == c or x.id == c), None)
+            if a is not None and agent_json(a)["online"]:
+                raise HTTPException(409, f"{a.name} is already online. Omit 'claim' to be given another name.")
+            if a is None:
+                nm = _unique_name(db, body.claim.strip()[:40] or "Agent")
+                a = Agent(id=slug(nm), name=nm)
+                db.add(a)
+        else:
+            idle = [x for x in agents if x.name in AGENT_NAMES and not agent_json(x)["online"]]
+            if idle:   # a restarted window gets a free name back (most recently used first)
+                a = max(idle, key=lambda x: aware(x.last_seen) or aware(x.created_at))
+            else:
+                used = {x.name.lower() for x in agents}
+                nm = next((n for n in AGENT_NAMES if n.lower() not in used), f"Agent{len(agents) + 1}")
+                aid, i = slug(nm), 2
+                while db.get(Agent, aid):
+                    aid, i = f"{slug(nm)}{i}", i + 1
+                a = Agent(id=aid, name=nm)
+                db.add(a)
+        a.last_seen = utcnow()
+        if body.info:
+            a.info = body.info
+        audit(db, "brain", "agent_hello", detail=f"{a.name} ({a.id})")
+        db.commit()
+        peers = [agent_json(x) for x in db.scalars(select(Agent)) if x.id != a.id]
+        return {**agent_json(a), "peers": peers,
+                "note": f"You are {a.name}. Use agent_id='{a.id}' in every call. The user can call you with '@{a.name.lower()}'."}
+
+    @app.get("/api/v1/agents")
+    def agents_list(db: Session = Depends(get_db), _=Depends(require_brain)):
+        return {"agents": [agent_json(a) for a in db.scalars(select(Agent).order_by(Agent.created_at))]}
+
+    @app.post("/api/v1/agent/agents/{agent_id}/rename")
+    def agent_rename(agent_id: str, body: schemas.AgentRename, dev: Device = Depends(require_device),
+                     db: Session = Depends(get_db)):
+        a = db.get(Agent, agent_id)
+        if a is None:
+            raise HTTPException(404, "unknown agent")
+        if any(x.name.lower() == body.name.lower() and x.id != a.id for x in db.scalars(select(Agent))):
+            raise HTTPException(409, "that name is taken")
+        a.name = body.name
+        db.commit()
+        return agent_json(a)
+
     # --------------------------------------------------------------- messages
     def source_of(ch: str) -> str:
         if ch == "app" or ch.startswith("app:"):
@@ -365,14 +465,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return "a relay API client (a separate conversation)"
         return "another client"
 
-    def msg_json(m: Message) -> dict:
-        return {"id": m.id, "direction": m.direction, "channel": m.channel, "source": source_of(m.channel),
-                "text": m.text, "created_at": iso(m.created_at)}
+    def msg_json(m: Message, with_context: bool = False) -> dict:
+        d = {"id": m.id, "direction": m.direction, "channel": m.channel, "source": source_of(m.channel),
+             "kind": m.msg_kind, "to_agent": m.to_agent, "from_agent": m.from_agent, "text": m.text,
+             "created_at": iso(m.created_at), "delivered_at": iso(m.delivered_at), "cancelled": bool(m.cancelled)}
+        if with_context:
+            d["context"] = m.context
+        return d
 
-    def fetch_msgs(db: Session, device_id: str, directions, after_id: int, limit: int, channel: str | None = None):
-        q = select(Message).where(Message.device_id == device_id, Message.direction.in_(directions))
+    def fetch_msgs(db: Session, device_id: str, directions, after_id: int, limit: int, channel: str | None = None,
+                   kinds=("msg",), unrouted_only: bool = False):
+        q = select(Message).where(Message.device_id == device_id, Message.direction.in_(directions),
+                                  Message.msg_kind.in_(kinds))
         if channel:
             q = q.where(Message.channel == channel)
+        if unrouted_only:
+            q = q.where(Message.to_agent.is_(None))
         if after_id <= 0:  # first call: newest `limit` messages, oldest first
             rows = list(reversed(db.scalars(q.order_by(Message.id.desc()).limit(limit)).all()))
         else:
@@ -382,47 +490,121 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/v1/agent/messages", status_code=201)
     def user_says(body: schemas.UserMessage, dev: Device = Depends(require_device),
                   db: Session = Depends(get_db)):
-        """Laptop app -> Brain: something the user typed."""
-        m = Message(device_id=dev.id, direction="user", text=body.text, channel=body.channel)
+        """Laptop -> agents: something the user typed. The laptop router sets `to_agent` and a context packet."""
+        if body.to_agent and db.get(Agent, body.to_agent) is None:
+            raise HTTPException(404, "unknown agent")
+        m = Message(device_id=dev.id, direction="user", text=body.text, channel=body.channel,
+                    to_agent=body.to_agent, context=body.context)
         db.add(m)
-        audit(db, f"device:{dev.id}", "user_message", device_id=dev.id, detail=body.text[:200])
+        audit(db, f"device:{dev.id}", "user_message", device_id=dev.id, detail=f"{len(body.text)} chars -> {body.to_agent}")
         db.commit()
         return msg_json(m)
 
     @app.get("/api/v1/agent/messages")
     def brain_says(after_id: int = 0, limit: int = Query(20, ge=1, le=100),
                    dev: Device = Depends(require_device), db: Session = Depends(get_db)):
-        """Brain -> laptop app."""
+        """(compat) Brain -> laptop. New code uses /agent/sync."""
         rows = fetch_msgs(db, dev.id, ("brain",), after_id, limit)
         return {"messages": [msg_json(m) for m in rows], "last_id": rows[-1].id if rows else after_id}
 
+    @app.get("/api/v1/agent/sync")
+    def agent_sync(after_id: int = 0, limit: int = Query(50, ge=1, le=200), dev: Device = Depends(require_device),
+                   db: Session = Depends(get_db)):
+        """One call for the laptop router: agent replies, unrouted inbound messages, undelivered dispatches, agents."""
+        dev = db.merge(dev)
+        dev.last_seen = utcnow()
+        cutoff = utcnow() - timedelta(minutes=30)
+        brain = db.scalars(select(Message).where(Message.device_id == dev.id, Message.direction == "brain",
+                                                 Message.id > after_id).order_by(Message.id).limit(limit)).all()
+        base = (Message.device_id == dev.id, Message.direction == "user", Message.cancelled.is_(False),
+                Message.delivered_at.is_(None), Message.created_at >= cutoff)
+        unrouted = db.scalars(select(Message).where(*base, Message.to_agent.is_(None), Message.channel.like("relay:%"))
+                              .order_by(Message.id).limit(20)).all()
+        pending = db.scalars(select(Message).where(*base, Message.to_agent.is_not(None)).order_by(Message.id).limit(100)).all()
+        agents = db.scalars(select(Agent).order_by(Agent.created_at)).all()
+        db.commit()
+        return {"messages": [msg_json(m) for m in brain], "last_id": brain[-1].id if brain else after_id,
+                "unrouted": [msg_json(m) for m in unrouted],
+                "pending": [{"id": m.id, "to_agent": m.to_agent, "channel": m.channel,
+                             "age_s": int((utcnow() - aware(m.created_at)).total_seconds())} for m in pending],
+                "agents": [agent_json(a) for a in agents]}
+
+    @app.post("/api/v1/agent/messages/{msg_id}/route")
+    def route_message(msg_id: int, body: schemas.RouteIn, dev: Device = Depends(require_device),
+                      db: Session = Depends(get_db)):
+        """The router claims an unrouted inbound message (e.g. from the relay chat API) for an agent."""
+        m = db.get(Message, msg_id)
+        if m is None or m.device_id != dev.id or m.direction != "user":
+            raise HTTPException(404, "unknown message")
+        if m.to_agent is not None or m.delivered_at is not None or m.cancelled:
+            raise HTTPException(409, "message is already routed or delivered")
+        if db.get(Agent, body.to_agent) is None:
+            raise HTTPException(404, "unknown agent")
+        m.to_agent, m.context = body.to_agent, body.context
+        db.commit()
+        return msg_json(m)
+
+    @app.post("/api/v1/agent/messages/{msg_id}/cancel")
+    def cancel_message(msg_id: int, dev: Device = Depends(require_device), db: Session = Depends(get_db)):
+        """Retract a dispatched message before an agent has picked it up (used for failover)."""
+        m = db.get(Message, msg_id)
+        if m is None or m.device_id != dev.id:
+            raise HTTPException(404, "unknown message")
+        if m.delivered_at is not None:
+            return {"cancelled": False, "delivered": True}
+        m.cancelled = True
+        db.commit()
+        return {"cancelled": True, "delivered": False}
+
     @app.get("/api/v1/messages")
     def brain_listens(device_id: str, after_id: int = 0, direction: str = "user", channel: str | None = None,
-                      wait: int = Query(0, ge=0, le=25),
+                      agent_id: str | None = None, wait: int = Query(0, ge=0, le=25),
                       limit: int = Query(20, ge=1, le=100), db: Session = Depends(get_db),
                       _=Depends(require_brain)):
-        """Brain polls what the user said (direction=user), optionally long-polling up to 25 s."""
+        """LISTEN. With `agent_id`: your inbox (messages the router addressed to YOU, each delivered once, with a
+        context packet). Without it (single-agent mode): unrouted messages. direction=all reads chat history."""
         import time
         if direction not in ("user", "brain", "all"):
             raise HTTPException(422, "direction must be user, brain or all")
-        dirs = ("user", "brain") if direction == "all" else (direction,)
         end = time.monotonic() + wait
+        inbox = direction == "user" and agent_id is not None
         while True:
-            rows = fetch_msgs(db, device_id, dirs, after_id, limit, channel)
+            if inbox:
+                touch_agent(db, agent_id)
+                q = select(Message).where(Message.device_id == device_id, Message.direction == "user",
+                                          Message.to_agent == agent_id, Message.delivered_at.is_(None),
+                                          Message.cancelled.is_(False), Message.msg_kind == "msg")
+                if channel:
+                    q = q.where(Message.channel == channel)
+                rows = db.scalars(q.order_by(Message.id).limit(limit)).all()
+                for m in rows:
+                    m.delivered_at, m.delivered_to = utcnow(), agent_id
+                db.commit()
+            else:
+                dirs = ("user", "brain") if direction == "all" else (direction,)
+                rows = fetch_msgs(db, device_id, dirs, after_id, limit, channel, unrouted_only=(direction == "user"))
+                if direction == "user":
+                    for m in rows:
+                        m.delivered_at = m.delivered_at or utcnow()
+                    db.commit()
             if rows or time.monotonic() >= end:
                 break
             time.sleep(1)
             db.rollback()  # end the read transaction so the next poll sees new rows
-        return {"messages": [msg_json(m) for m in rows], "last_id": rows[-1].id if rows else after_id}
+        last = max((m.id for m in rows), default=after_id)
+        return {"messages": [msg_json(m, with_context=inbox) for m in rows], "last_id": last}
 
     @app.post("/api/v1/messages", status_code=201)
     def brain_replies(body: schemas.BrainMessage, db: Session = Depends(get_db), _=Depends(require_brain)):
         dev = db.get(Device, body.device_id)
         if dev is None or dev.revoked:
             raise HTTPException(404, "unknown or revoked device")
-        m = Message(device_id=dev.id, direction="brain", text=body.text, channel=body.channel)
+        if body.agent_id:
+            touch_agent(db, body.agent_id)
+        m = Message(device_id=dev.id, direction="brain", text=body.text, channel=body.channel,
+                    from_agent=body.agent_id, msg_kind=body.kind)
         db.add(m)
-        audit(db, "brain", "brain_message", device_id=dev.id, detail=body.text[:200])
+        audit(db, "brain", "brain_message", device_id=dev.id, detail=f"{len(body.text)} chars from {body.agent_id}")
         db.commit()
         return msg_json(m)
 
@@ -503,7 +685,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                 .order_by(Message.id.desc()).limit(1)).first() or 0
         m = Message(device_id=dev.id, direction="user", text=body.text, channel=chan)
         db.add(m)
-        audit(db, "user-api", "user_message", device_id=dev.id, detail=body.text[:200])
+        audit(db, "user-api", "user_message", device_id=dev.id, detail=f"{len(body.text)} chars")
         db.commit()
         end, replies = time.monotonic() + body.wait, []
         while True:
@@ -540,6 +722,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "tasks": {k: [task_json(t, full=False) for t in v] for k, v in groups.items()},
                 "history": [task_json(t, full=False) for t in tasks],
                 "memory": [mem_json(m) for m in db.scalars(select(Memory).order_by(Memory.updated_at.desc()).limit(200))],
+                "agents": [agent_json(a) for a in db.scalars(select(Agent).order_by(Agent.created_at))],
                 "audit": [{"ts": iso(a.ts), "actor": a.actor, "event": a.event,
                            "request_id": a.request_id, "device_id": a.device_id,
                            "detail": a.detail} for a in logs]}

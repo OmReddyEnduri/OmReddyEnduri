@@ -222,3 +222,119 @@ def test_migration_adds_channel_column(tmp_path):
     with eng.connect() as cx:
         assert cx.execute(text("SELECT channel FROM messages")).scalar() == "app"      # old rows default to the app chat
     _ensure_columns(eng)   # idempotent
+
+
+# ------------------------------------------------------------------ multi-agent
+def hello(c, **body):
+    return c.post("/api/v1/agents/hello", json=body, headers=H(BRAIN))
+
+
+def age_agent(app, agent_id, seconds=600):
+    from datetime import timedelta
+    from app.db import Agent, utcnow
+    with app.state.Session() as db:
+        db.get(Agent, agent_id).last_seen = utcnow() - timedelta(seconds=seconds)
+        db.commit()
+
+
+def test_relay_gives_agents_names(env):
+    c, dev, dtok, app = env
+    a, b = hello(c).json(), hello(c).json()
+    assert (a["name"], a["agent_id"]) == ("Nova", "nova") and (b["name"], b["agent_id"]) == ("Atlas", "atlas")
+    assert "@nova" in a["note"] and [p["name"] for p in b["peers"]] == ["Nova"]
+    assert hello(c, claim="nova").status_code == 409                       # Nova is online: cannot be stolen
+    assert hello(c, agent_id="nova").json()["name"] == "Nova"              # resume own identity
+    age_agent(app, "nova")                                                 # Nova goes offline...
+    assert hello(c, claim="Nova").json()["agent_id"] == "nova"             # ...her name can be claimed back
+    age_agent(app, "nova"); age_agent(app, "atlas")
+    assert hello(c).json()["name"] in ("Nova", "Atlas")                    # a fresh window gets an idle name, not a new one
+    assert len(c.get("/api/v1/agents", headers=H(BRAIN)).json()["agents"]) == 2
+    assert c.post("/api/v1/agent/agents/nova/rename", json={"name": "Atlas"}, headers=H(dtok)).status_code == 409
+    assert c.post("/api/v1/agent/agents/nova/rename", json={"name": "Sparky"}, headers=H(dtok)).json()["name"] == "Sparky"
+    assert c.post("/api/v1/agent/agents/nova/rename", json={"name": "x"}, headers=H(BRAIN)).status_code == 403
+
+
+def test_addressed_delivery_cancel_and_sync(env):
+    c, dev, dtok, app = env
+    hello(c), hello(c)                                                     # nova, atlas
+    ctx = {"notes": "building the site", "recent_messages": [{"who": "you", "text": "hi"}]}
+    m = c.post("/api/v1/agent/messages", json={"text": "do it", "channel": "app:x", "to_agent": "nova", "context": ctx},
+               headers=H(dtok)).json()
+    assert c.post("/api/v1/agent/messages", json={"text": "x", "to_agent": "ghost"}, headers=H(dtok)).status_code == 404
+    # undelivered dispatch is visible to the router through sync
+    sy = c.get("/api/v1/agent/sync", headers=H(dtok)).json()
+    assert [p["id"] for p in sy["pending"]] == [m["id"]] and {a["agent_id"] for a in sy["agents"]} == {"nova", "atlas"}
+    # only the addressed agent receives it, once, with the context packet
+    assert c.get(f"/api/v1/messages?device_id={dev}&agent_id=atlas", headers=H(BRAIN)).json()["messages"] == []
+    got = c.get(f"/api/v1/messages?device_id={dev}&agent_id=nova", headers=H(BRAIN)).json()["messages"]
+    assert [x["text"] for x in got] == ["do it"] and got[0]["context"] == ctx and got[0]["delivered_at"]
+    assert c.get(f"/api/v1/messages?device_id={dev}&agent_id=nova", headers=H(BRAIN)).json()["messages"] == []
+    assert c.get("/api/v1/agent/sync", headers=H(dtok)).json()["pending"] == []        # delivered -> no longer pending
+    assert c.post(f"/api/v1/agent/messages/{m['id']}/cancel", headers=H(dtok)).json() == {"cancelled": False, "delivered": True}
+    # failover: retract an undelivered message so the dead agent can never pick it up late
+    m2 = c.post("/api/v1/agent/messages", json={"text": "again", "to_agent": "nova"}, headers=H(dtok)).json()
+    assert c.post(f"/api/v1/agent/messages/{m2['id']}/cancel", headers=H(dtok)).json()["cancelled"] is True
+    assert c.get(f"/api/v1/messages?device_id={dev}&agent_id=nova", headers=H(BRAIN)).json()["messages"] == []
+    # replies carry the agent; notes are context for the laptop, not chat text
+    c.post("/api/v1/messages", json={"device_id": dev, "text": "done", "channel": "app:x", "agent_id": "nova"}, headers=H(BRAIN))
+    c.post("/api/v1/messages", json={"device_id": dev, "text": "site v1 built; next: pricing", "channel": "app:x",
+                                     "agent_id": "nova", "kind": "notes"}, headers=H(BRAIN))
+    sy = c.get("/api/v1/agent/sync", headers=H(dtok)).json()
+    assert [(x["kind"], x["from_agent"]) for x in sy["messages"]] == [("msg", "nova"), ("notes", "nova")]
+    assert [x["text"] for x in c.get(f"/api/v1/messages?device_id={dev}&direction=brain&channel=app:x", headers=H(BRAIN)).json()["messages"]] == ["done"]
+
+
+def test_unrouted_relay_messages_are_routed_by_the_laptop(env):
+    c, dev, dtok, app = env
+    U = "u" * 32
+    hello(c)
+    c.post("/api/v1/chat", json={"text": "hi from the api", "wait": 0, "chat_id": "z"}, headers=H(U))
+    sy = c.get("/api/v1/agent/sync", headers=H(dtok)).json()
+    assert [m["text"] for m in sy["unrouted"]] == ["hi from the api"]
+    mid = sy["unrouted"][0]["id"]
+    assert c.get(f"/api/v1/messages?device_id={dev}&agent_id=nova", headers=H(BRAIN)).json()["messages"] == []   # not routed yet
+    assert c.post(f"/api/v1/agent/messages/{mid}/route", json={"to_agent": "nova", "context": {"k": 1}}, headers=H(dtok)).status_code == 200
+    assert c.post(f"/api/v1/agent/messages/{mid}/route", json={"to_agent": "nova"}, headers=H(dtok)).status_code == 409
+    got = c.get(f"/api/v1/messages?device_id={dev}&agent_id=nova", headers=H(BRAIN)).json()["messages"]
+    assert got[0]["channel"] == "relay:z" and got[0]["context"] == {"k": 1}
+    assert c.get("/api/v1/agent/sync", headers=H(dtok)).json()["unrouted"] == []
+
+
+def test_tasks_remember_agent_and_channel_and_relay_purges_old_data(env):
+    from datetime import timedelta
+    from app.db import Message, Task, utcnow
+    from app.main import purge
+    c, dev, dtok, app = env
+    c.post("/api/v1/tasks", json=mk("t1", dev, agent_id="nova", channel="app:x"), headers=H(BRAIN))
+    t = c.get("/api/v1/tasks/t1", headers=H(BRAIN)).json()
+    assert (t["agent_id"], t["channel"]) == ("nova", "app:x")
+    hello(c)
+    c.post("/api/v1/agent/messages", json={"text": "old", "to_agent": "nova"}, headers=H(dtok))
+    c.get(f"/api/v1/messages?device_id={dev}&agent_id=nova", headers=H(BRAIN))
+    c.post("/api/v1/agent/messages", json={"text": "fresh", "to_agent": "nova"}, headers=H(dtok))
+    with app.state.Session() as db:
+        for m in db.query(Message).filter(Message.text == "old"):
+            m.created_at = utcnow() - timedelta(hours=2)
+        tk = db.query(Task).filter(Task.request_id == "t1").one()
+        tk.status, tk.completed_at = "completed", utcnow() - timedelta(hours=100)
+        db.commit()
+        purge(db, app.state.settings)
+        assert [m.text for m in db.query(Message)] == ["fresh"]            # delivered+old purged, undelivered kept
+        assert db.query(Task).count() == 0                                 # finished tasks do not live forever
+
+
+def test_migration_adds_multi_agent_columns(tmp_path):
+    from sqlalchemy import create_engine, inspect, text
+    from app.db import _ensure_columns
+    eng = create_engine(f"sqlite:///{tmp_path}/old.db")
+    with eng.begin() as cx:
+        cx.execute(text("CREATE TABLE messages (id INTEGER PRIMARY KEY, device_id VARCHAR(64), direction VARCHAR(8), text TEXT, created_at DATETIME, channel VARCHAR(64) NOT NULL DEFAULT 'app')"))
+        cx.execute(text("CREATE TABLE tasks (id INTEGER PRIMARY KEY, request_id VARCHAR(128))"))
+        cx.execute(text("INSERT INTO messages (device_id, direction, text) VALUES ('d','user','old')"))
+    _ensure_columns(eng)
+    got = {c["name"] for c in inspect(eng).get_columns("messages")}
+    assert {"to_agent", "from_agent", "msg_kind", "context", "delivered_at", "delivered_to", "cancelled"} <= got
+    assert {"agent_id", "channel"} <= {c["name"] for c in inspect(eng).get_columns("tasks")}
+    with eng.connect() as cx:
+        assert cx.execute(text("SELECT msg_kind, cancelled FROM messages")).one() == ("msg", 0)
+    _ensure_columns(eng)   # idempotent
