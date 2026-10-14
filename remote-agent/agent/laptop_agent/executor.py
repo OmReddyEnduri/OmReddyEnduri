@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timezone
 
 from .policy import Verdict
+from .redact import redact
 
 SCRUB_ENV = ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "APIKEY", "CREDENTIAL", "ENROLL")
 
@@ -125,19 +126,21 @@ def execute(v: Verdict, task_timeout: int, cap: int, cancel: threading.Event, on
             trunc = len(raw) > v.plan["max_bytes"]
             return ExecResult(stdout=raw[:v.plan["max_bytes"]].decode("utf-8", "replace"),
                               truncated=trunc, started=started)
+        if t == "read_files":
+            return _read_files(v.plan, started)
+        if t == "write_files":
+            done = []
+            try:
+                for f in v.plan["files"]:
+                    _atomic_write(f["path"], f["content"])
+                    done.append(f["path"])
+            except OSError as e:
+                return ExecResult("failed", 1, stdout="\n".join(f"wrote {p}" for p in done),
+                                  error=f"{type(e).__name__}: {e} (written so far: {len(done)})", started=started)
+            return ExecResult(stdout="\n".join(f"wrote {p}" for p in done), data={"written": done}, started=started)
         if t == "write_file":
             path = v.plan["path"]
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".agent-tmp-")
-            try:
-                with os.fdopen(fd, "wb") as f:
-                    f.write(v.plan["content"].encode())
-                if os.path.exists(path):
-                    shutil.copymode(path, tmp)
-                os.replace(tmp, path)
-            finally:
-                if os.path.exists(tmp):
-                    os.unlink(tmp)
+            _atomic_write(path, v.plan["content"])
             return ExecResult(stdout=f"wrote {len(v.plan['content'].encode())} bytes to {path}", started=started)
         if t == "make_dir":
             os.makedirs(v.plan["path"], exist_ok=True)
@@ -145,6 +148,8 @@ def execute(v: Verdict, task_timeout: int, cap: int, cancel: threading.Event, on
         if t == "delete_file":
             os.unlink(v.plan["path"])
             return ExecResult(stdout=f"deleted {v.plan['path']}", started=started)
+        if t == "screenshot":
+            return _screenshot(v.plan, started)
         if t in ("run_command", "run_script", "install_package"):
             return run_process(v.plan["argv"], v.plan["cwd"], min(task_timeout, 3600), cap, cancel, on_output)
         return ExecResult("failed", 1, error=f"no executor for {t}", started=started)
@@ -162,3 +167,97 @@ def _status_text(workspaces) -> str:
         except OSError as e:
             lines.append(f"workspace: {w}  (disk info unavailable: {e})")
     return "\n".join(lines)
+
+
+def _screenshot(plan: dict, started: str) -> ExecResult:
+    import base64
+    import io
+    try:
+        from PIL import Image, ImageGrab
+    except ImportError:
+        return ExecResult("failed", 1, error="Pillow is not installed (pip install Pillow)", started=started)
+    try:
+        img = ImageGrab.grab(all_screens=True) if sys.platform.startswith("win") else ImageGrab.grab()
+    except Exception as e:  # no display, permission denied (macOS screen recording), etc.
+        return ExecResult("failed", 1, error=f"screen capture failed: {type(e).__name__}: {e}", started=started)
+    path = plan["path"]
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    img.convert("RGB").save(path)
+    data = {"path": path, "width": img.width, "height": img.height}
+    if plan["return_image"]:
+        small = img.convert("RGB")
+        if small.width > plan["max_width"]:
+            small = small.resize((plan["max_width"], round(small.height * plan["max_width"] / small.width)))
+        buf = io.BytesIO()
+        small.save(buf, "JPEG", quality=70)
+        while buf.tell() > 700_000 and small.width > 400:   # keep the result small
+            small = small.resize((small.width * 3 // 4, small.height * 3 // 4))
+            buf = io.BytesIO()
+            small.save(buf, "JPEG", quality=60)
+        data.update(image_mime="image/jpeg", image_base64=base64.b64encode(buf.getvalue()).decode(),
+                    image_width=small.width, image_height=small.height)
+    return ExecResult(stdout=f"screenshot saved to {path} ({img.width}x{img.height})", data=data, started=started)
+
+
+def _atomic_write(path: str, content: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".agent-tmp-")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(content.encode())
+        if os.path.exists(path):
+            shutil.copymode(path, tmp)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def _read_files(plan: dict, started: str) -> ExecResult:
+    import fnmatch
+    import hashlib
+    from pathlib import PurePath
+    from .policy import Policy
+    cands = list(plan["files"])
+    if plan["root"]:
+        root, seen = plan["root"], set(map(os.path.normcase, cands))
+        for dp, dns, fns in os.walk(root):
+            dns[:] = sorted(d for d in dns if d not in plan["skip_dirs"])
+            for fn in sorted(fns):
+                full = os.path.join(dp, fn)
+                rel = PurePath(os.path.relpath(full, root)).as_posix()
+                if any(fnmatch.fnmatch(rel, g.replace("**/", "")) or fnmatch.fnmatch(rel, g) for g in plan["globs"]) \
+                        and os.path.normcase(full) not in seen:
+                    cands.append(full)
+                    seen.add(os.path.normcase(full))
+    files, skipped, total = [], [], 0
+    for p in cands:
+        if len(files) >= plan["max_files"]:
+            skipped.append({"path": p, "reason": "max_files reached"})
+            continue
+        if Policy._sensitive(p):
+            skipped.append({"path": p, "reason": "secret/credential file"})
+            continue
+        try:
+            if os.path.islink(p) or not os.path.isfile(p):
+                skipped.append({"path": p, "reason": "not a regular file"})
+                continue
+            with open(p, "rb") as f:
+                raw = f.read(plan["max_bytes_per_file"] + 1)
+        except OSError as e:
+            skipped.append({"path": p, "reason": str(e)})
+            continue
+        if b"\x00" in raw[:8192]:
+            skipped.append({"path": p, "reason": "binary"})
+            continue
+        trunc = len(raw) > plan["max_bytes_per_file"]
+        text = redact(raw[:plan["max_bytes_per_file"]].decode("utf-8", "replace"), strict_only=True)
+        if total + len(text) > plan["total_cap"]:
+            skipped.append({"path": p, "reason": "total size cap reached"})
+            continue
+        total += len(text)
+        files.append({"path": p, "size": os.path.getsize(p), "truncated": trunc, "content": text,
+                      "sha256": hashlib.sha256(raw).hexdigest()})
+    summary = f"{len(files)} file(s), {total} chars, {len(skipped)} skipped"
+    return ExecResult(stdout=summary, truncated=any(f["truncated"] for f in files) or bool(skipped),
+                      data={"files": files, "skipped": skipped, "total_chars": total}, started=started)

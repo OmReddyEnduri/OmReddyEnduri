@@ -195,3 +195,34 @@ def test_relay_outage_reconnects(stack):
         if eng.state == "connected": break
         time.sleep(0.1)
     assert eng.state == "connected"
+
+
+def test_screenshot_end_to_end(stack, monkeypatch):
+    import base64
+    from PIL import Image, ImageGrab
+    monkeypatch.setattr(ImageGrab, "grab", lambda **k: Image.new("RGB", (2000, 1000), (10, 120, 200)))
+    eng, brain, appr, cfg, ws, _ = stack
+    submit(brain, cfg, "t-shot", "screenshot", {"path": str(ws / "screenshots" / "a.png")})
+    j = wait(brain, "t-shot")
+    assert j["status"] == "completed" and (ws / "screenshots" / "a.png").exists()
+    assert appr.seen and appr.seen[0].operation == "screenshot"
+    assert j["data"]["width"] == 2000 and j["data"]["image_width"] == 1280
+    assert base64.b64decode(j["data"]["image_base64"])[:2] == b"\xff\xd8"   # JPEG
+
+
+def test_write_files_then_read_files_roundtrip(stack):
+    eng, brain, appr, cfg, ws, _ = stack
+    files = [{"path": str(ws / "app" / "src" / "App.jsx"), "content": "export default () => <h1>hi</h1>;\nconst token = getToken();\n"},
+             {"path": str(ws / "app" / "package.json"), "content": '{"name":"app"}'},
+             {"path": str(ws / "app" / "node_modules" / "x" / "i.js"), "content": "skipme"},
+             {"path": str(ws / "app" / ".env"), "content": "SECRET=1"}]
+    submit(brain, cfg, "t-wf", "write_files", {"files": files[:3]})
+    assert wait(brain, "t-wf")["status"] == "completed" and len(appr.seen) == 1
+    submit(brain, cfg, "t-wf2", "write_files", {"files": [files[3]]})      # .env write is blocked
+    assert wait(brain, "t-wf2")["status"] == "blocked"
+    submit(brain, cfg, "t-rf", "read_files", {"dir": str(ws / "app"), "globs": ["**/*.jsx", "**/*.json", "**/*.js"]})
+    j = wait(brain, "t-rf")
+    got = {os.path.basename(f["path"]): f for f in j["data"]["files"]}
+    assert j["status"] == "completed" and set(got) == {"App.jsx", "package.json"}      # node_modules skipped
+    assert "const token = getToken();" in got["App.jsx"]["content"]                     # code not mangled
+    assert len(appr.seen) == 1                                                          # reads need no prompt

@@ -4,6 +4,7 @@ HTTPS + DB-backed polling only; no WebSockets, no inbound laptop port.
 """
 import asyncio
 import contextlib
+import json
 import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -160,7 +161,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ------------------------------------------------------------ brain tasks
     @app.post("/api/v1/tasks")
     def create_task(body: schemas.TaskCreate, db: Session = Depends(get_db), _=Depends(require_brain)):
-        import json
         if len(json.dumps(body.arguments)) > settings.max_args_bytes:
             raise HTTPException(413, "arguments too large")
         dev = db.get(Device, body.device_id)
@@ -277,6 +277,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(409, f"task already {t.status}")
         if t.status != "running":
             raise HTTPException(409, f"task is {t.status}; no approved execution to report")
+        if body.data is not None and len(json.dumps(body.data)) > 2_000_000:
+            raise HTTPException(413, "result data too large")
         cap = settings.max_output_bytes
         trunc = body.output_truncated or len(body.stdout) > cap or len(body.stderr) > cap
         t.status, t.exit_code, t.stdout, t.stderr = body.status, body.exit_code, body.stdout[:cap], body.stderr[:cap]

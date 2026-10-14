@@ -6,7 +6,8 @@ ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 
 TASK_TYPES = (
     "device_status", "list_dir", "read_file", "write_file", "make_dir",
-    "delete_file", "run_command", "run_script", "install_package",
+    "delete_file", "run_command", "run_script", "install_package", "screenshot",
+    "read_files", "write_files",
 )
 
 

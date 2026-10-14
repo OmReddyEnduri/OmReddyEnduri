@@ -100,3 +100,30 @@ def test_redaction():
         assert leak not in r
     assert "-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----" not in redact(
         "-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----")
+
+
+def test_screenshot_policy_and_powershell(pol):
+    p, ws = pol
+    v = p.classify("screenshot", {})
+    assert v.level == ASK and "SENT TO THE BRAIN" in v.impact and v.plan["path"].startswith(str(ws))
+    assert lvl(p, "screenshot", {"path": "/tmp/x.png"}) == BLOCK            # outside workspace
+    assert lvl(p, "screenshot", {"path": str(ws / "s.txt")}) == BLOCK       # bad extension
+    (ws / "s.ps1").write_text("Get-Date")
+    v = p.classify("run_script", {"path": str(ws / "s.ps1")})
+    assert v.level == ASK and v.plan["argv"][:4] == ["powershell", "-NoProfile", "-NonInteractive", "-File"]
+    (ws / "bad.ps1").write_text("Set-MpPreference -DisableRealtimeMonitoring $true")
+    assert lvl(p, "run_script", {"path": str(ws / "bad.ps1")}) == BLOCK
+
+
+def test_multi_file_policies(pol):
+    p, ws = pol
+    assert lvl(p, "read_files", {"dir": str(ws)}) == AUTO
+    assert lvl(p, "read_files", {"paths": [str(ws / "a.txt")]}) == AUTO
+    assert lvl(p, "read_files", {"paths": [str(ws / ".env")]}) == BLOCK
+    assert lvl(p, "read_files", {"dir": "/etc"}) == BLOCK
+    assert lvl(p, "read_files", {"dir": str(ws), "globs": ["../*"]}) == BLOCK
+    ok = {"files": [{"path": str(ws / "src" / "App.jsx"), "content": "x"}, {"path": str(ws / "src" / "i.js"), "content": "y"}]}
+    assert lvl(p, "write_files", ok) == ASK
+    assert lvl(p, "write_files", {"files": [{"path": "/etc/x", "content": "x"}]}) == BLOCK
+    assert lvl(p, "write_files", {"files": [{"path": str(ws / "a.txt"), "content": "x"}]}) == BLOCK   # exists
+    assert lvl(p, "write_files", {"files": [{"path": str(ws / ".bashrc"), "content": "x"}]}) == BLOCK

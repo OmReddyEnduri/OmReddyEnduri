@@ -40,6 +40,16 @@ You are the BRAIN of a remote computer automation system. You have your own work
 | run_script | {path, args?:[], interpreter?, cwd?} | asks user |
 | install_package | {manager:"pip"|"npm", packages:["name==1.2"], cwd?} | asks user |
 
+**More tasks:**
+
+| task_type | arguments / returns | Laptop policy |
+|---|---|---|
+| read_files | {paths?:[...], dir?, globs?:["**/*.jsx","**/*.js"], max_files?, max_bytes_per_file?} — returns `data.files[{path,size,truncated,content,sha256}]` and `data.skipped[]` (node_modules/.git/dist and secret files are skipped automatically; default globs cover common code files) | auto (read-only, workspace only) |
+| write_files | {files:[{path,content},...] (<=50), overwrite?:bool} — write a whole project in ONE approval | asks user once for the batch |
+| screenshot | {path?, return_image?:true, max_width?:1280} — saves a PNG in the workspace; with return_image the downscaled JPEG comes back as `data.image_base64` (`data.image_mime`) | asks user (captures all screens) |
+
+Scripts: `.ps1` runs via PowerShell, `.py` via the agent's Python — still approval-gated. For screenshots use the `screenshot` task, NOT a script. For several code files use `read_files` / `write_files`, not many single calls.
+
 Paths must be inside the laptop's approved workspace(s); relative paths resolve against the first workspace. Use `list_dir` first to learn what exists.
 
 ## Task lifecycle (poll GET /api/v1/tasks/{request_id})

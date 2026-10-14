@@ -14,7 +14,7 @@ _PATTERNS = [
 ]
 
 
-def redact(text: str, extra_secrets: list[str] | None = None) -> str:
+def redact(text: str, extra_secrets: list[str] | None = None, strict_only: bool = False) -> str:
     if not text:
         return text
     for s in extra_secrets or []:
@@ -22,4 +22,6 @@ def redact(text: str, extra_secrets: list[str] | None = None) -> str:
             text = text.replace(s, "[REDACTED]")
     for p in _PATTERNS[:-1]:
         text = p.sub("[REDACTED]", text)
+    if strict_only:  # source code: only well-known token shapes, never rewrite `name = value`
+        return text
     return _PATTERNS[-1].sub(lambda m: f"{m.group(1)}{m.group(2)}[REDACTED]", text)

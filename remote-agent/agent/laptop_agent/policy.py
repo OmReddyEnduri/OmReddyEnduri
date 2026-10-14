@@ -44,8 +44,8 @@ STRING_DANGERS = [
     (re.compile(r"(?i)(laptop[-_ ]?agent|LaptopAgent)[/\\]|config\.json.*device_token|device_token"), "touches the agent's own configuration"),
 ]
 PKG_NAME = re.compile(r"^[A-Za-z0-9@][A-Za-z0-9._/@-]{0,100}(\[[A-Za-z0-9,_-]+\])?((==|>=|<=|~=|<|>|@)[A-Za-z0-9.*+!_-]{1,40})?$")
-INTERPRETERS = {".py": "python3", ".sh": "bash", ".js": "node", ".mjs": "node", ".ps1": "pwsh", ".rb": "ruby"}
-ALLOWED_INTERPRETERS = {"python3", "python", "bash", "sh", "node", "pwsh", "ruby"}
+INTERPRETERS = {".py": "python3", ".sh": "bash", ".js": "node", ".mjs": "node", ".ps1": "powershell", ".rb": "ruby"}
+ALLOWED_INTERPRETERS = {"python3", "python", "bash", "sh", "node", "pwsh", "powershell", "ruby"}
 
 
 @dataclass
@@ -228,6 +228,82 @@ class Policy:
                     raise PermissionError("argument references the agent's own configuration")
         return exe
 
+    CODE_GLOBS = ["**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.mjs", "**/*.json", "**/*.css", "**/*.scss",
+                  "**/*.html", "**/*.md", "**/*.py", "**/*.c", "**/*.cc", "**/*.cpp", "**/*.h", "**/*.hpp",
+                  "**/*.java", "**/*.go", "**/*.rs", "**/*.cs", "**/*.sh", "**/*.ps1", "**/*.yml", "**/*.yaml",
+                  "**/*.toml", "**/*.txt", "**/*.sql", "**/*.vue", "**/*.svelte"]
+    SKIP_DIRS = ("node_modules", ".git", "dist", "build", ".next", "__pycache__", ".venv", "venv", "target", ".cache")
+
+    def _c_read_files(self, v, a):
+        paths, root = a.get("paths"), a.get("dir")
+        if paths is None and root is None:
+            raise ValueError("give 'paths' (list) and/or 'dir' (+ optional 'globs')")
+        plan = {"files": [], "root": None, "globs": [], "max_files": max(1, min(int(a.get("max_files", 50)), 200)),
+                "max_bytes_per_file": max(1000, min(int(a.get("max_bytes_per_file", 200_000)), 500_000)),
+                "total_cap": 1_200_000, "skip_dirs": list(self.SKIP_DIRS)}
+        if paths is not None:
+            if not (isinstance(paths, list) and 1 <= len(paths) <= 200 and all(isinstance(x, str) for x in paths)):
+                raise ValueError("paths must be a list of 1-200 strings")
+            for raw in paths:
+                real = self._path(v, raw)
+                if self._sensitive(real):
+                    raise PermissionError(f"reading credential/secret files is blocked: {real}")
+                plan["files"].append(real)
+        if root is not None:
+            r = self._path(v, root)
+            if self._sensitive(r):
+                raise PermissionError("credential directory is blocked")
+            if not os.path.isdir(r):
+                raise ValueError("dir is not an existing directory")
+            globs = a.get("globs") or self.CODE_GLOBS
+            if not (isinstance(globs, list) and all(isinstance(g, str) and ".." not in g and not os.path.isabs(g) for g in globs)):
+                raise ValueError("globs must be relative patterns without '..'")
+            plan["root"], plan["globs"] = r, globs
+        v.plan, v.files, v.level = plan, plan["files"] or [plan["root"]], AUTO
+        v.impact = "Read-only: sends the contents of text/code files to the Brain (secret files are skipped)."
+
+    def _c_write_files(self, v, a):
+        files, overwrite = a.get("files"), bool(a.get("overwrite", False))
+        if not (isinstance(files, list) and 1 <= len(files) <= 50):
+            raise ValueError("files must be a list of 1-50 {path, content}")
+        out, total, seen = [], 0, set()
+        for f in files:
+            if not (isinstance(f, dict) and isinstance(f.get("content"), str)):
+                raise ValueError("each file needs path and string content")
+            real = self._path(v, f.get("path"))
+            self._write_checks(real)
+            if os.path.isdir(real):
+                raise ValueError(f"path is a directory: {real}")
+            if os.path.normcase(real) in seen:
+                raise ValueError(f"duplicate path: {real}")
+            seen.add(os.path.normcase(real))
+            if os.path.exists(real) and not overwrite:
+                raise ValueError(f"file exists (set overwrite=true): {real}")
+            total += len(f["content"].encode())
+            out.append({"path": real, "content": f["content"], "exists": os.path.exists(real)})
+        if total > MAX_WRITE:
+            raise ValueError("total content exceeds 5 MB")
+        n_over = sum(1 for f in out if f["exists"])
+        v.plan, v.files, v.level = {"files": out}, [f["path"] for f in out], ASK
+        v.impact = f"Creates {len(out) - n_over} and overwrites {n_over} file(s), {total} bytes total."
+        v.preview = "\n\n".join(f"=== {f['path']} ===\n{f['content'][:800]}" for f in out[:4])
+
+    def _c_screenshot(self, v, a):
+        import time as _t
+        raw = a.get("path") or os.path.join(self.workspaces[0], "screenshots",
+                                            _t.strftime("screenshot-%Y%m%d-%H%M%S.png"))
+        real = self._path(v, raw)
+        if os.path.splitext(real)[1].lower() not in (".png", ".jpg", ".jpeg"):
+            raise ValueError("path must end in .png or .jpg")
+        if os.path.isdir(real):
+            raise ValueError("path is a directory")
+        ri = bool(a.get("return_image", True))
+        mw = int(a.get("max_width", 1280))
+        v.plan = {"path": real, "return_image": ri, "max_width": max(320, min(mw, 1920))}
+        v.files, v.level = [real], ASK
+        v.impact = ("Captures EVERYTHING visible on all screens (may include private content) and saves it to this file."
+                    + (" A downscaled copy is also SENT TO THE BRAIN (the remote LLM)." if ri else ""))
+
     @staticmethod
     def _py(name: str) -> str:
         import sys
@@ -258,7 +334,8 @@ class Policy:
         if not (isinstance(args, list) and all(isinstance(x, str) for x in args)):
             raise ValueError("args must be a list of strings")
         self._check_argv([interp, real, *args], cwd)
-        v.plan = {"argv": [self._py(interp), real, *args], "cwd": cwd}
+        head = [interp, "-NoProfile", "-NonInteractive", "-File"] if interp in ("powershell", "pwsh") else [self._py(interp)]
+        v.plan = {"argv": [*head, real, *args], "cwd": cwd}
         v.files, v.level, v.preview = [real], ASK, text[:3000]
         v.impact = "Executes this script; it may create, change or delete files and use the network."
 

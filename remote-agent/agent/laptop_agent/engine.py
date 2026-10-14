@@ -316,7 +316,7 @@ class AgentEngine:
         trunc = r.truncated or len(out) > cap or len(err) > cap
         return {"status": r.status, "exit_code": r.exit_code, "stdout": out[:cap], "stderr": err[:cap],
                 "output_truncated": trunc, "error": redact(r.error or "", sec) or None,
-                "started_at": r.started, "completed_at": r.completed}
+                "started_at": r.started, "completed_at": r.completed, "data": r.data}
 
     # -------------------------------------------------------------- UI snapshot
     def snapshot(self) -> dict:
