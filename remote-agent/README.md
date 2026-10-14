@@ -34,6 +34,15 @@ python -m laptop_agent run            # desktop window; add --headless for conso
 ```
 Config (device token, mode 600): Linux `~/.config/laptop-agent/`, macOS `~/Library/Application Support/LaptopAgent/`, Windows `%APPDATA%\LaptopAgent\`. Local audit log lives beside it (rotating, 5 x 1 MB).
 
+## Ask level (set in the desktop window only)
+| Level | Automatic (no popup) | Always asks |
+|---|---|---|
+| 1 Low | reads, creating/editing files and folders inside the workspace | run commands/scripts, installs, deletes, screenshots |
+| 2 Medium (default) | reads, creating NEW files and folders | overwriting files, plus everything level 1 asks |
+| 3 High | status, listing, reading only | every change |
+
+Blocked actions stay blocked at every level. Lowering the level asks you to confirm. The level can't be changed from the web UI, chat, or the Brain, and the change is written to the local audit log.
+
 ## Permissions (enforced on the laptop, the relay cannot override)
 - **Auto**: device_status, list_dir and read_file inside approved workspaces (non-secret text only).
 - **Ask** (native dialog: APPROVE ONCE / REJECT / CANCEL; default button REJECT; no timeout): write_file, make_dir, delete_file (single file), run_command, run_script, install_package.

@@ -35,7 +35,7 @@ def stack(tmp_path):
             time.sleep(0.05)
     ws = tmp_path / "ws"; ws.mkdir()
     r = register(url, ENROLL, "test-laptop", {"os": "test"})
-    cfg = Config(relay_url=url, device_id=r["device_id"], device_token=r["device_token"], workspaces=[str(ws)])
+    cfg = Config(relay_url=url, device_id=r["device_id"], device_token=r["device_token"], workspaces=[str(ws)], security_level=3)
     appr = ScriptedApprover()
     eng = AgentEngine(cfg, appr, Audit(cfg.secrets, tmp_path / "audit.log"))
     cfg.poll_interval_s, cfg.heartbeat_interval_s = 0.15, 0.3
@@ -226,3 +226,18 @@ def test_write_files_then_read_files_roundtrip(stack):
     assert j["status"] == "completed" and set(got) == {"App.jsx", "package.json"}      # node_modules skipped
     assert "const token = getToken();" in got["App.jsx"]["content"]                     # code not mangled
     assert len(appr.seen) == 1                                                          # reads need no prompt
+
+
+def test_level2_auto_creates_new_files_but_asks_to_overwrite(stack):
+    eng, brain, appr, cfg, ws, _ = stack
+    eng.set_security_level(2)
+    submit(brain, cfg, "t-l2a", "write_file", {"path": str(ws / "new.jsx"), "content": "a"})
+    assert wait(brain, "t-l2a")["status"] == "completed" and appr.seen == []      # auto, no prompt
+    submit(brain, cfg, "t-l2b", "write_file", {"path": str(ws / "new.jsx"), "content": "b", "overwrite": True})
+    assert wait(brain, "t-l2b")["status"] == "completed" and len(appr.seen) == 1  # overwrite asks
+    eng.set_security_level(1)
+    submit(brain, cfg, "t-l1", "write_file", {"path": str(ws / "new.jsx"), "content": "c", "overwrite": True})
+    assert wait(brain, "t-l1")["status"] == "completed" and len(appr.seen) == 1   # level 1: no new prompt
+    submit(brain, cfg, "t-l1c", "run_command", {"argv": ["python3", "-c", "print(1)"]})
+    wait(brain, "t-l1c"); assert len(appr.seen) == 2                              # commands always ask
+    assert (ws / "new.jsx").read_text() == "c"

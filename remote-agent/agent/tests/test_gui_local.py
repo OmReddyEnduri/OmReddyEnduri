@@ -55,7 +55,7 @@ def test_main_window_builds(tmp_path):
     cfg = Config(relay_url="https://x.example", device_id="d", device_token="t" * 20, workspaces=[str(tmp_path)])
     eng = AgentEngine(cfg, None, Audit(cfg.secrets, tmp_path / "a.log"))
     w = MainWindow(eng, Bridge(), LocalServer(eng, 8765)); w.refresh()
-    assert "Connection" in w.status.text()
+    assert "Stopped" in w.status.text() or "Reconnecting" in w.status.text()
 
 
 @pytest.fixture

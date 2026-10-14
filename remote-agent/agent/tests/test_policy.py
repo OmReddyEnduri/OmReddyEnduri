@@ -29,6 +29,7 @@ def test_auto(pol):
 
 def test_ask(pol):
     p, ws = pol
+    p.level = 3
     assert lvl(p, "write_file", {"path": str(ws / "new.txt"), "content": "x"}) == ASK
     assert lvl(p, "write_file", {"path": str(ws / "a.txt"), "content": "x", "overwrite": True}) == ASK
     assert lvl(p, "run_command", {"argv": ["echo", "hi"]}) == ASK
@@ -117,6 +118,7 @@ def test_screenshot_policy_and_powershell(pol):
 
 def test_multi_file_policies(pol):
     p, ws = pol
+    p.level = 3
     assert lvl(p, "read_files", {"dir": str(ws)}) == AUTO
     assert lvl(p, "read_files", {"paths": [str(ws / "a.txt")]}) == AUTO
     assert lvl(p, "read_files", {"paths": [str(ws / ".env")]}) == BLOCK
@@ -127,3 +129,25 @@ def test_multi_file_policies(pol):
     assert lvl(p, "write_files", {"files": [{"path": "/etc/x", "content": "x"}]}) == BLOCK
     assert lvl(p, "write_files", {"files": [{"path": str(ws / "a.txt"), "content": "x"}]}) == BLOCK   # exists
     assert lvl(p, "write_files", {"files": [{"path": str(ws / ".bashrc"), "content": "x"}]}) == BLOCK
+
+
+@pytest.mark.parametrize("level,new_file,overwrite,mkdir,cmd,delete,shot", [
+    (1, AUTO, AUTO, AUTO, ASK, ASK, ASK),
+    (2, AUTO, ASK, AUTO, ASK, ASK, ASK),
+    (3, ASK, ASK, ASK, ASK, ASK, ASK),
+])
+def test_security_levels(pol, level, new_file, overwrite, mkdir, cmd, delete, shot):
+    p, ws = pol
+    p.level = level
+    assert lvl(p, "write_file", {"path": str(ws / "n.txt"), "content": "x"}) == new_file
+    assert lvl(p, "write_file", {"path": str(ws / "a.txt"), "content": "x", "overwrite": True}) == overwrite
+    assert lvl(p, "make_dir", {"path": str(ws / "dd")}) == mkdir
+    assert lvl(p, "write_files", {"files": [{"path": str(ws / "w1.js"), "content": "x"}]}) == new_file
+    assert lvl(p, "write_files", {"files": [{"path": str(ws / "a.txt"), "content": "x"}], "overwrite": True}) == overwrite
+    assert lvl(p, "run_command", {"argv": ["echo", "hi"]}) == cmd
+    assert lvl(p, "delete_file", {"path": str(ws / "a.txt")}) == delete
+    assert lvl(p, "screenshot", {}) == shot
+    # blocks never relax at any level
+    assert lvl(p, "write_file", {"path": str(ws / ".bashrc"), "content": "x"}) == BLOCK
+    assert lvl(p, "write_file", {"path": "/etc/x", "content": "x"}) == BLOCK
+    assert lvl(p, "run_command", {"argv": ["sudo", "ls"]}) == BLOCK

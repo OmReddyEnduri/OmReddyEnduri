@@ -35,7 +35,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;p
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const H={'X-Requested-With':'agent-ui'};
 async function g(){const r=await fetch('/api/state',{headers:H});if(!r.ok)return;const s=await r.json();
- st.innerHTML=`<b>Connection:</b> <span class="${s.state==='connected'?'ok':'bad'}">${esc(s.state)}</span>${s.paused?' (paused)':''}<br><b>Relay:</b> ${esc(s.relay_url)}<br><b>Device:</b> ${esc(s.device_id)}<br><b>Active task:</b> ${esc(s.active||'-')}<br><b>Workspaces:</b> ${esc(s.workspaces.join(', '))}`;
+ st.innerHTML=`<b>Connection:</b> <span class="${s.state==='connected'?'ok':'bad'}">${esc(s.state)}</span>${s.paused?' (paused)':''}<br><b>Relay:</b> ${esc(s.relay_url)}<br><b>Device:</b> ${esc(s.device_id)}<br><b>Active task:</b> ${esc(s.active||'-')}<br><b>Security level:</b> ${esc(s.security_level)}<br><b>Workspaces:</b> ${esc(s.workspaces.join(', '))}`;
  tk.innerHTML='<tr><th>Request</th><th>Type</th><th>Risk</th><th>Status</th></tr>'+s.tasks.map(t=>`<tr><td>${esc(t.request_id)}</td><td>${esc(t.task_type)}</td><td>${esc(t.risk)}</td><td>${esc(t.status)}</td></tr>`).join('');
  nt.textContent=s.notices.map(n=>n.level.toUpperCase()+': '+n.msg).join('\\n');tm.textContent=s.terminal.join('\\n')}
 async function c(a){const r=await fetch('/api/control/'+a,{method:'POST',headers:H});msg.textContent=r.ok?'':' failed';g()}
@@ -45,7 +45,7 @@ async function send(){const t=document.getElementById('in').value;if(!t)return;d
 g();setInterval(g,2000);
 </script></body></html>"""
 
-HELP = ("Commands: status | pause | resume | disconnect | start | tasks | last | workspaces | help.\n"
+HELP = ("Commands: status | level | pause | resume | disconnect | start | tasks | last | workspaces | help.\n"
         "This chat cannot run commands or approve operations.")
 
 
@@ -68,6 +68,11 @@ def chat_reply(engine: AgentEngine, text: str) -> str:
     if cmd == "disconnect":
         engine.disconnect()
         return "Disconnected."
+    if cmd.startswith("level"):
+        from .policy import LEVEL_NAMES
+        lv = engine.policy.level
+        return (f"Security level {lv} ({LEVEL_NAMES[lv]}). It can only be changed in the desktop window, "
+                "not from chat, the web UI or the Brain.")
     if cmd == "workspaces":
         return "\n".join(engine.cfg.workspaces)
     if cmd in ("tasks", "last"):

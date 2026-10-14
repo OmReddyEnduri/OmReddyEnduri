@@ -61,8 +61,22 @@ class Verdict:
     plan: dict = field(default_factory=dict)   # normalized values the executor will use
 
 
+LEVEL_NAMES = {1: "Low", 2: "Medium", 3: "High"}
+LEVEL_HELP = {
+    1: "Asks only before running programs/scripts, installing packages, deleting files or taking screenshots. "
+       "Creating and editing files inside your workspace is automatic.",
+    2: "Creating NEW files and folders inside your workspace is automatic. Asks before overwriting files, "
+       "deleting, running programs/scripts, installing packages or taking screenshots.",
+    3: "Asks before every change: writes, folders, deletes, programs, scripts, installs and screenshots. "
+       "Only status, listing and reading are automatic.",
+}
+# The level can only RELAX file writes inside the workspace. Blocks never relax; running code,
+# installing, deleting and screen capture always ask.
+
+
 class Policy:
-    def __init__(self, workspaces: list[str]):
+    def __init__(self, workspaces: list[str], level: int = 2):
+        self.level = level
         self.workspaces = [os.path.realpath(w) for w in workspaces]
         self.protected = [os.path.realpath(str(config_dir()))]
 
@@ -122,11 +136,22 @@ class Policy:
             if fn is None:
                 raise PermissionError(f"unknown task_type: {task_type}")
             fn(v, args)
+            self._apply_level(v, task_type)
         except PermissionError as e:
             v.level, v.reasons = BLOCK, v.reasons + [str(e)]
         except (ValueError, TypeError, KeyError) as e:
             v.level, v.reasons = BLOCK, v.reasons + [f"invalid arguments: {e}"]
         return v
+
+    def _apply_level(self, v: Verdict, task_type: str) -> None:
+        if v.level != ASK or self.level >= 3:
+            return
+        new_only = not v.plan.get("exists") and not any(f.get("exists") for f in v.plan.get("files", []))
+        relax = (task_type == "make_dir"
+                 or (task_type in ("write_file", "write_files") and (self.level == 1 or new_only)))
+        if relax:
+            v.level = AUTO
+            v.reasons.append(f"auto-approved by security level {self.level} ({LEVEL_NAMES[self.level]})")
 
     def _c_device_status(self, v, a):
         v.level, v.impact = AUTO, "Read-only system summary."
@@ -166,7 +191,7 @@ class Policy:
         overwrite = bool(a.get("overwrite", False))
         if exists and not overwrite:
             raise ValueError("file exists; set overwrite=true to modify it")
-        v.plan = {"path": real, "content": content}
+        v.plan = {"path": real, "content": content, "exists": exists}
         v.files, v.level = [real], ASK
         v.impact = (f"{'Overwrites existing' if exists else 'Creates new'} file ({len(content.encode())} bytes).")
         v.preview = content[:3000]

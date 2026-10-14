@@ -56,7 +56,7 @@ class AgentEngine:
         cfg.validate()
         self.cfg, self.approver = cfg, approver
         self.audit = audit or Audit(cfg.secrets)
-        self.policy = Policy(cfg.workspaces)
+        self.policy = Policy(cfg.workspaces, cfg.security_level)
         self.state = STOPPED
         self.paused = False
         self.active: str | None = None
@@ -108,6 +108,19 @@ class AgentEngine:
                 self.tasks.appendleft(row)
             row.update(kw)
         self._emit("task", dict(row))
+
+    def set_security_level(self, level: int):
+        """Only callable from the native GUI. Persists and audits the change."""
+        if level not in (1, 2, 3):
+            raise ValueError("level must be 1, 2 or 3")
+        old, self.policy.level, self.cfg.security_level = self.policy.level, level, level
+        try:
+            from . import config as C
+            C.save(self.cfg)
+        except Exception as e:
+            self.notify("warning", f"Could not save security level: {e}")
+        self.audit.write("security_level_changed", old=old, new=level)
+        self._emit("level", level)
 
     # ----------------------------------------------------------------- control
     def start(self):
@@ -321,7 +334,7 @@ class AgentEngine:
     # -------------------------------------------------------------- UI snapshot
     def snapshot(self) -> dict:
         return {"state": self.state, "paused": self.paused, "active": self.active,
-                "relay_url": self.cfg.relay_url, "device_id": self.cfg.device_id,
+                "relay_url": self.cfg.relay_url, "security_level": self.policy.level, "device_id": self.cfg.device_id,
                 "workspaces": self.cfg.workspaces, "last_error": self.last_error,
                 "tasks": [{k: v for k, v in t.items() if k != "arguments"} for t in list(self.tasks)[:100]],
                 "terminal": list(self.terminal)[-300:], "notices": list(self.notices)[:50]}

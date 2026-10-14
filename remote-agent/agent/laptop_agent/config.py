@@ -28,6 +28,7 @@ class Config:
     ui_port: int = 8765
     max_output_bytes: int = 128 * 1024
     max_task_seconds: int = 3600
+    security_level: int = 2            # 1 low (ask least) .. 3 high (ask most)
 
     def validate(self) -> None:
         u = urlparse(self.relay_url)
@@ -36,6 +37,8 @@ class Config:
             raise ValueError("relay_url must be https:// (http:// allowed only for localhost testing)")
         if not (2 <= self.poll_interval_s <= 5):
             raise ValueError("poll_interval_s must be between 2 and 5")
+        if self.security_level not in (1, 2, 3):
+            raise ValueError("security_level must be 1, 2 or 3")
         if self.ui_port < 1024 or self.ui_port > 65535:
             raise ValueError("ui_port out of range")
         if not self.workspaces:
