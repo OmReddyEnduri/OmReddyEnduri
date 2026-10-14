@@ -122,7 +122,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/healthz")
     def healthz():
-        return {"ok": True}
+        return {"ok": True, "database": engine.dialect.name}
 
     # ---------------------------------------------------------------- devices
     @app.post("/api/v1/devices/register", status_code=201)
