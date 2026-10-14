@@ -1,0 +1,26 @@
+# Render Blueprint: relay web service + Postgres.  Repo root = this repository.
+databases:
+  - name: relay-db
+    plan: free            # free Postgres expires after 30 days; use basic-256mb for permanent use
+    databaseName: relay
+    user: relay
+services:
+  - type: web
+    name: laptop-relay
+    runtime: python
+    plan: free            # free web services sleep after 15 min without requests; agent heartbeats keep it awake
+    rootDir: remote-agent/relay
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.asgi:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*'
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: DATABASE_URL
+        fromDatabase: {name: relay-db, property: connectionString}
+      - key: BRAIN_API_TOKEN
+        generateValue: true
+      - key: ADMIN_TOKEN
+        generateValue: true
+      - key: ENROLL_TOKEN
+        generateValue: true

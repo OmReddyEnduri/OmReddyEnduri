@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Relay Dashboard</title>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--mut:#666;--card:#f5f5f7;--bd:#ddd;--ok:#0a7a3d;--bad:#b3261e;--warn:#9a6700}
+@media (prefers-color-scheme:dark){:root{--bg:#111;--fg:#eee;--mut:#999;--card:#1c1c1e;--bd:#333;--ok:#4cd38a;--bad:#ff6b63;--warn:#e3b341}}
+body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:14px system-ui,sans-serif}
+h1{font-size:18px;margin:0 0 12px}h2{font-size:15px;margin:20px 0 8px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:10px 12px;margin-bottom:8px}
+table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:4px 6px;border-bottom:1px solid var(--bd);vertical-align:top;word-break:break-word}
+.on{color:var(--ok)}.off{color:var(--bad)}.mut{color:var(--mut)}
+input,button{font:inherit;padding:6px 8px;border:1px solid var(--bd);border-radius:6px;background:var(--card);color:var(--fg)}
+.tabs button{margin-right:4px}.tabs button.sel{border-color:var(--fg)}
+#login{max-width:420px}
+</style></head><body>
+<h1>Remote Laptop Relay</h1>
+<div id="login" class="card">Admin token: <input id="tok" type="password" size="28" autocomplete="off"> <button id="go">Sign in</button> <div id="err" class="off"></div></div>
+<div id="app" hidden>
+<div id="devs"></div>
+<div class="tabs"><button data-t="active">Active</button><button data-t="completed">Completed</button><button data-t="failed">Failed</button><button data-t="rejected">Rejected</button><button data-t="history">History</button><button data-t="audit">Audit</button></div>
+<div id="view"></div>
+</div>
+<script>
+let tok=sessionStorage.getItem('adm')||'',tab='active',data=null;
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(path,opt={}){const r=await fetch(path,{...opt,headers:{Authorization:'Bearer '+tok}});if(!r.ok)throw new Error(r.status);return r.json()}
+async function load(){try{data=await api('/api/v1/admin/overview');$('#login').hidden=true;$('#app').hidden=false;render()}catch(e){$('#app').hidden=true;$('#login').hidden=false;$('#err').textContent='Sign-in failed ('+e.message+')';sessionStorage.removeItem('adm')}}
+function render(){
+ $('#devs').innerHTML='<h2>Devices</h2>'+data.devices.map(d=>`<div class="card"><b>${esc(d.name)}</b> <code>${esc(d.device_id)}</code> — <span class="${d.online?'on':'off'}">${d.online?'ONLINE ('+esc(d.agent_state)+')':'OFFLINE'}</span>${d.revoked?' <span class="off">REVOKED</span>':''}<br><span class="mut">last heartbeat: ${esc(d.last_heartbeat||'never')} · ${esc(JSON.stringify(d.info))}</span><br>${d.revoked?'':`<button data-rev="${esc(d.device_id)}">Revoke token</button>`}</div>`).join('')||'<div class="mut">No devices</div>';
+ document.querySelectorAll('[data-t]').forEach(b=>b.classList.toggle('sel',b.dataset.t===tab));
+ let h='';
+ if(tab==='audit'){h='<table><tr><th>Time</th><th>Actor</th><th>Event</th><th>Request</th><th>Detail</th></tr>'+data.audit.map(a=>`<tr><td>${esc(a.ts)}</td><td>${esc(a.actor)}</td><td>${esc(a.event)}</td><td>${esc(a.request_id)}</td><td>${esc(a.detail)}</td></tr>`).join('')+'</table>'}
+ else{const rows=tab==='history'?data.history:data.tasks[tab];h=`<h2>${esc(tab)} (${rows.length})</h2><table><tr><th>Request</th><th>Type</th><th>Status</th><th>Risk</th><th>Reason</th><th>Created</th><th>Exit</th><th>Error</th></tr>`+rows.map(t=>`<tr><td>${esc(t.request_id)}</td><td>${esc(t.task_type)}</td><td>${esc(t.status)}</td><td>${esc(t.risk)}</td><td>${esc(t.reason)}</td><td>${esc(t.created_at)}</td><td>${esc(t.exit_code)}</td><td>${esc(t.error)}</td></tr>`).join('')+'</table>'}
+ $('#view').innerHTML=h}
+$('#go').onclick=()=>{tok=$('#tok').value.trim();sessionStorage.setItem('adm',tok);load()};
+document.addEventListener('click',async e=>{const t=e.target.dataset;if(t.t){tab=t.t;render()}if(t.rev&&confirm('Revoke this device token? The laptop must be re-registered.')){await fetch('/api/v1/admin/devices/'+encodeURIComponent(t.rev)+'/revoke',{method:'POST',headers:{Authorization:'Bearer '+tok}});load()}});
+if(tok)load();setInterval(()=>{if(tok&&!$('#app').hidden)load()},5000);
+</script></body></html>
