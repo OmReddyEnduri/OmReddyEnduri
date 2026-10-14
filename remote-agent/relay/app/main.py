@@ -356,11 +356,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return task_json(t, full=False)
 
     # --------------------------------------------------------------- messages
-    def msg_json(m: Message) -> dict:
-        return {"id": m.id, "direction": m.direction, "text": m.text, "created_at": iso(m.created_at)}
+    def source_of(ch: str) -> str:
+        if ch == "app" or ch.startswith("app:"):
+            return "the user typing in their laptop app chat"
+        if ch.startswith("local:"):
+            return "a local API client on the user's laptop (a separate conversation)"
+        if ch.startswith("relay:"):
+            return "a relay API client (a separate conversation)"
+        return "another client"
 
-    def fetch_msgs(db: Session, device_id: str, directions, after_id: int, limit: int):
+    def msg_json(m: Message) -> dict:
+        return {"id": m.id, "direction": m.direction, "channel": m.channel, "source": source_of(m.channel),
+                "text": m.text, "created_at": iso(m.created_at)}
+
+    def fetch_msgs(db: Session, device_id: str, directions, after_id: int, limit: int, channel: str | None = None):
         q = select(Message).where(Message.device_id == device_id, Message.direction.in_(directions))
+        if channel:
+            q = q.where(Message.channel == channel)
         if after_id <= 0:  # first call: newest `limit` messages, oldest first
             rows = list(reversed(db.scalars(q.order_by(Message.id.desc()).limit(limit)).all()))
         else:
@@ -371,7 +383,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def user_says(body: schemas.UserMessage, dev: Device = Depends(require_device),
                   db: Session = Depends(get_db)):
         """Laptop app -> Brain: something the user typed."""
-        m = Message(device_id=dev.id, direction="user", text=body.text)
+        m = Message(device_id=dev.id, direction="user", text=body.text, channel=body.channel)
         db.add(m)
         audit(db, f"device:{dev.id}", "user_message", device_id=dev.id, detail=body.text[:200])
         db.commit()
@@ -385,7 +397,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"messages": [msg_json(m) for m in rows], "last_id": rows[-1].id if rows else after_id}
 
     @app.get("/api/v1/messages")
-    def brain_listens(device_id: str, after_id: int = 0, direction: str = "user", wait: int = Query(0, ge=0, le=25),
+    def brain_listens(device_id: str, after_id: int = 0, direction: str = "user", channel: str | None = None,
+                      wait: int = Query(0, ge=0, le=25),
                       limit: int = Query(20, ge=1, le=100), db: Session = Depends(get_db),
                       _=Depends(require_brain)):
         """Brain polls what the user said (direction=user), optionally long-polling up to 25 s."""
@@ -395,7 +408,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         dirs = ("user", "brain") if direction == "all" else (direction,)
         end = time.monotonic() + wait
         while True:
-            rows = fetch_msgs(db, device_id, dirs, after_id, limit)
+            rows = fetch_msgs(db, device_id, dirs, after_id, limit, channel)
             if rows or time.monotonic() >= end:
                 break
             time.sleep(1)
@@ -407,7 +420,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         dev = db.get(Device, body.device_id)
         if dev is None or dev.revoked:
             raise HTTPException(404, "unknown or revoked device")
-        m = Message(device_id=dev.id, direction="brain", text=body.text)
+        m = Message(device_id=dev.id, direction="brain", text=body.text, channel=body.channel)
         db.add(m)
         audit(db, "brain", "brain_message", device_id=dev.id, detail=body.text[:200])
         db.commit()
@@ -484,16 +497,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """You (curl/script, any machine) -> Brain. Waits up to `wait` s for the Brain's next reply."""
         import time
         dev = _chat_device(db, body.device_id)
-        last_brain = db.scalars(select(Message.id).where(Message.device_id == dev.id, Message.direction == "brain")
+        chan = f"relay:{body.chat_id}"
+        last_brain = db.scalars(select(Message.id).where(Message.device_id == dev.id, Message.direction == "brain",
+                                                         Message.channel == chan)
                                 .order_by(Message.id.desc()).limit(1)).first() or 0
-        m = Message(device_id=dev.id, direction="user", text=body.text)
+        m = Message(device_id=dev.id, direction="user", text=body.text, channel=chan)
         db.add(m)
         audit(db, "user-api", "user_message", device_id=dev.id, detail=body.text[:200])
         db.commit()
         end, replies = time.monotonic() + body.wait, []
         while True:
             db.rollback()
-            replies = fetch_msgs(db, dev.id, ("brain",), last_brain, 20)
+            replies = fetch_msgs(db, dev.id, ("brain",), last_brain, 20, chan)   # ONLY this conversation
             if replies or time.monotonic() >= end:
                 break
             time.sleep(1)
@@ -501,9 +516,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/v1/chat")
     def user_chat_history(after_id: int = 0, limit: int = Query(20, ge=1, le=100), device_id: str | None = None,
-                          db: Session = Depends(get_db), _=Depends(require_user)):
+                          chat_id: str = "default", db: Session = Depends(get_db), _=Depends(require_user)):
         dev = _chat_device(db, device_id)
-        rows = fetch_msgs(db, dev.id, ("user", "brain"), after_id, limit)
+        rows = fetch_msgs(db, dev.id, ("user", "brain"), after_id, limit, f"relay:{chat_id}")
         return {"device_id": dev.id, "messages": [msg_json(r) for r in rows],
                 "last_id": rows[-1].id if rows else after_id}
 

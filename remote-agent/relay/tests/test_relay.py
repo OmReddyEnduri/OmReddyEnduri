@@ -137,7 +137,9 @@ def test_user_api_chat(env):
     assert r.status_code == 201 and r.json()["replies"] == [] and r.json()["device_id"] == dev
     got = c.get(f"/api/v1/messages?device_id={dev}", headers=H(BRAIN)).json()["messages"]
     assert got[0]["text"] == "hello from my key"                       # Brain sees it as a user message
-    c.post("/api/v1/messages", json={"device_id": dev, "text": "pong"}, headers=H(BRAIN))
+    assert got[0]["channel"] == "relay:default"
+    c.post("/api/v1/messages", json={"device_id": dev, "text": "leak?"}, headers=H(BRAIN))        # goes to the app chat, not this API chat
+    c.post("/api/v1/messages", json={"device_id": dev, "text": "pong", "channel": "relay:default"}, headers=H(BRAIN))
     hist = c.get("/api/v1/chat", headers=H(U)).json()["messages"]
     assert [m["text"] for m in hist] == ["hello from my key", "pong"]
 
@@ -177,3 +179,46 @@ def test_memory_accepts_sloppy_llm_input(env):
                                                          "tags": ["run-window", "ist"], "pinned": True})
     assert r.status_code == 201 and r.json()["tags"] == "run-window, ist"
     assert c.post("/api/v1/memory", headers=H(BRAIN), json={"kind": "weird", "title": "x"}).status_code == 422
+
+
+def test_channels_keep_conversations_separate(env):
+    c, dev, dtok, _ = env
+    U = "u" * 32
+    # app chat, a second app chat, and two relay-API clients all talk at once
+    c.post("/api/v1/agent/messages", json={"text": "from app"}, headers=H(dtok))
+    c.post("/api/v1/agent/messages", json={"text": "from app chat 2", "channel": "app:b2"}, headers=H(dtok))
+    c.post("/api/v1/agent/messages", json={"text": "from local api", "channel": "local:scriptA"}, headers=H(dtok))
+    r1 = c.post("/api/v1/chat", json={"text": "hi from alice", "wait": 0, "chat_id": "alice"}, headers=H(U)).json()
+    c.post("/api/v1/chat", json={"text": "hi from bob", "wait": 0, "chat_id": "bob"}, headers=H(U))
+    inbox = c.get(f"/api/v1/messages?device_id={dev}&limit=50", headers=H(BRAIN)).json()["messages"]
+    by = {m["text"]: m for m in inbox}
+    assert by["from app"]["channel"] == "app" and "laptop app" in by["from app"]["source"]
+    assert by["from local api"]["channel"] == "local:scriptA" and "separate conversation" in by["from local api"]["source"]
+    assert by["hi from alice"]["channel"] == "relay:alice" and by["hi from bob"]["channel"] == "relay:bob"
+    only_bob = c.get(f"/api/v1/messages?device_id={dev}&channel=relay:bob", headers=H(BRAIN)).json()["messages"]
+    assert [m["text"] for m in only_bob] == ["hi from bob"]
+    # Brain answers alice ONLY: bob's call and the app must not see it
+    c.post("/api/v1/messages", json={"device_id": dev, "text": "hello alice", "channel": "relay:alice"}, headers=H(BRAIN))
+    c.post("/api/v1/messages", json={"device_id": dev, "text": "hello app"}, headers=H(BRAIN))                 # default channel "app"
+    a = c.post("/api/v1/chat", json={"text": "again", "wait": 0, "chat_id": "alice"}, headers=H(U)).json()
+    hist_alice = c.get("/api/v1/chat?chat_id=alice", headers=H(U)).json()["messages"]
+    hist_bob = c.get("/api/v1/chat?chat_id=bob", headers=H(U)).json()["messages"]
+    assert "hello alice" in [m["text"] for m in hist_alice] and "hello alice" not in [m["text"] for m in hist_bob]
+    assert "hello app" not in [m["text"] for m in hist_alice + hist_bob]
+    dev_msgs = c.get("/api/v1/agent/messages", headers=H(dtok)).json()["messages"]
+    assert {m["text"]: m["channel"] for m in dev_msgs} == {"hello alice": "relay:alice", "hello app": "app"}
+    assert c.post("/api/v1/agent/messages", json={"text": "x", "channel": "bad channel!"}, headers=H(dtok)).status_code == 422
+
+
+def test_migration_adds_channel_column(tmp_path):
+    from sqlalchemy import create_engine, text, inspect
+    from app.db import _ensure_columns
+    eng = create_engine(f"sqlite:///{tmp_path}/old.db")
+    with eng.begin() as cx:
+        cx.execute(text("CREATE TABLE messages (id INTEGER PRIMARY KEY, device_id VARCHAR(64), direction VARCHAR(8), text TEXT, created_at DATETIME)"))
+        cx.execute(text("INSERT INTO messages (device_id, direction, text) VALUES ('d','user','old msg')"))
+    _ensure_columns(eng)
+    assert "channel" in {c["name"] for c in inspect(eng).get_columns("messages")}
+    with eng.connect() as cx:
+        assert cx.execute(text("SELECT channel FROM messages")).scalar() == "app"      # old rows default to the app chat
+    _ensure_columns(eng)   # idempotent

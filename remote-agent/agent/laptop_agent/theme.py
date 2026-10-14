@@ -11,6 +11,10 @@ STATUS_COLORS = {
 }
 
 QSS = f"""
+QListWidget {{ background: #0a0f14; border: 1px solid {BORDER}; border-radius: 10px; padding: 6px; outline: 0; }}
+QListWidget::item {{ padding: 11px 12px; border-radius: 8px; color: {TEXT}; margin-bottom: 2px; }}
+QListWidget::item:hover {{ background: {CARD}; }}
+QListWidget::item:selected {{ background: {CARD2}; color: {TEXT}; border-left: 3px solid {ACCENT}; }}
 QFrame#sidebar {{ background: #0a0e13; border-right: 1px solid {BORDER}; }}
 QPushButton#nav {{ text-align: left; background: transparent; border: none; padding: 11px 14px; border-radius: 8px; color: {MUTED}; font-weight: 600; }}
 QPushButton#nav:hover {{ color: {TEXT}; background: {CARD}; }}

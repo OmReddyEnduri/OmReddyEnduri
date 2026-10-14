@@ -237,23 +237,24 @@ class AgentEngine:
             self._stop.wait(self.cfg.poll_interval_s * random.uniform(0.8, 1.2))
 
     # -------------------------------------------------------------------- chat
-    def send_user_message(self, text: str) -> bool:
-        """User typed something in the app -> relay -> Brain (text only; never executes anything)."""
+    def send_user_message(self, text: str, channel: str = "app") -> bool:
+        """Text typed by the user (or a local API client) -> relay -> Brain, tagged with its conversation
+        `channel`. Text only; never executes anything."""
         text = (text or "").strip()[:4000]
         if not text or not self._client or self._stop.is_set():
             return False
-        self._add_chat("you", text)
+        self._add_chat("you", text, channel)
 
         def post():
             try:
-                self._client.send_message(text)
+                self._client.send_message(text, channel)
             except Exception as e:
                 self.notify("warning", f"Message not delivered to the Brain: {e}")
         threading.Thread(target=post, daemon=True).start()
         return True
 
-    def _add_chat(self, who: str, text: str):
-        row = {"who": who, "text": text, "ts": time.time()}
+    def _add_chat(self, who: str, text: str, channel: str = "app"):
+        row = {"who": who, "text": text, "ts": time.time(), "channel": channel}
         self.chat.append(row)
         self._emit("chat", row)
 
@@ -262,8 +263,10 @@ class AgentEngine:
             try:
                 r = self._client.brain_messages(self._chat_last)
                 for m in r.get("messages", []):
-                    self._add_chat("brain", m["text"])
-                    self.audit.write("brain_message", text=m["text"][:200])
+                    ch = m.get("channel", "app")
+                    if ch == "app" or ch.startswith(("app:", "local:")):   # relay:* replies belong to relay API callers
+                        self._add_chat("brain", m["text"], ch)
+                        self.audit.write("brain_message", channel=ch, text=m["text"][:200])
                 self._chat_last = r.get("last_id", self._chat_last)
                 self._stop.wait(2.5)
             except RelayError as e:
@@ -382,7 +385,7 @@ class AgentEngine:
                 "relay_url": self.cfg.relay_url, "security_level": self.policy.level, "device_id": self.cfg.device_id,
                 "workspaces": self.cfg.workspaces, "last_error": self.last_error,
                 "tasks": [{k: v for k, v in t.items() if k != "arguments"} for t in list(self.tasks)[:100]],
-                "terminal": list(self.terminal)[-300:], "chat": list(self.chat)[-60:], "notices": list(self.notices)[:50]}
+                "terminal": list(self.terminal)[-300:], "chat": list(self.chat)[-200:], "notices": list(self.notices)[:50]}
 
 
 class _AnyEvent:

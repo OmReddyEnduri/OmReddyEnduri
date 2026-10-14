@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import secrets
 import tempfile
 import threading
 import time
@@ -11,7 +12,7 @@ import time
 from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QDialog, QFrame, QGridLayout,
-                               QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
+                               QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit,
                                QPushButton, QScrollArea, QStackedWidget, QTableWidget, QTableWidgetItem, QTextBrowser,
                                QVBoxLayout, QWidget)
 
@@ -386,7 +387,6 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh)
         self.timer.start(700)
-        self._chat_items: list = []
         self._render_chat()
         self.refresh()
 
@@ -457,27 +457,50 @@ class MainWindow(QMainWindow):
 
     def _build_chat(self) -> QWidget:
         page = QWidget()
-        lay = QVBoxLayout(page)
-        lay.setContentsMargins(0, 0, 0, 0)
+        outer = QHBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(14)
+        # ---- left: conversations
+        left = QVBoxLayout()
+        left.addWidget(_label("Chats", "title"))
+        self.chat_list = QListWidget()
+        self.chat_list.setFixedWidth(200)
+        left.addWidget(self.chat_list, 1)
+        self.b_newchat = QPushButton("+  New chat")
+        self.b_newchat.setObjectName("primary")
+        left.addWidget(self.b_newchat)
+        outer.addLayout(left)
+        # ---- right: the selected conversation
+        lay = QVBoxLayout()
         head = QHBoxLayout()
-        head.addWidget(_label("Chat with the Brain", "title"), 1)
+        self.chat_title = _label("General", "title")
+        head.addWidget(self.chat_title, 1)
         self.b_stop = QPushButton("STOP the Brain")
         self.b_stop.setObjectName("stop")
         self.b_stop.setToolTip("Sends the word \"stop\" to the Brain. It halts all work until you talk to it again.")
         head.addWidget(self.b_stop)
         lay.addLayout(head)
-        lay.addWidget(_label("The Brain is always listening. Type normally. Local commands start with / (try /help). "
-                             "Chat never runs commands on this laptop.", "muted", wrap=True))
+        self.chat_hint = _label("", "muted", wrap=True)
+        lay.addWidget(self.chat_hint)
         self.chatview = QTextBrowser()
         lay.addWidget(self.chatview, 1)
         row = QHBoxLayout()
         self.chat_in = QLineEdit()
-        self.chat_in.setPlaceholderText("Talk to the Brain…")
         self.b_send = QPushButton("Send")
         self.b_send.setObjectName("primary")
         row.addWidget(self.chat_in, 1)
         row.addWidget(self.b_send)
         lay.addLayout(row)
+        outer.addLayout(lay, 1)
+        # state: one list of messages per conversation (channel)
+        self._chats: dict[str, list] = {}
+        self._titles = {"app": "General"}
+        self._unread: set[str] = set()
+        self._cur = "app"
+        self._ensure_chat("app")
+        self.chat_list.setCurrentRow(0)
+        self.chat_list.currentItemChanged.connect(self._select_chat)
+        self.b_newchat.clicked.connect(self._new_chat)
         return page
 
     def _build_connect(self) -> QWidget:
@@ -558,26 +581,73 @@ class MainWindow(QMainWindow):
         self.engine.set_security_level(n)
         self.refresh()
 
+    # ----------------------------------------------------------------- chats
+    def _chat_title(self, ch: str) -> str:
+        if ch in self._titles:
+            return self._titles[ch]
+        return ("API · " + ch[6:]) if ch.startswith("local:") else ch
+
+    def _ensure_chat(self, ch: str):
+        if ch in self._chats:
+            return
+        self._chats[ch] = []
+        it = QListWidgetItem(self._chat_title(ch))
+        it.setData(Qt.UserRole, ch)
+        self.chat_list.addItem(it)
+
+    def _refresh_chat_list(self):
+        for i in range(self.chat_list.count()):
+            it = self.chat_list.item(i)
+            ch = it.data(Qt.UserRole)
+            it.setText(self._chat_title(ch) + ("   ●" if ch in self._unread else ""))
+
+    def _select_chat(self, item, _prev=None):
+        if item is None:
+            return
+        self._cur = item.data(Qt.UserRole)
+        self._unread.discard(self._cur)
+        api = self._cur.startswith("local:")
+        self.chat_title.setText(self._chat_title(self._cur))
+        self.chat_in.setEnabled(not api)
+        self.b_send.setEnabled(not api)
+        self.chat_in.setPlaceholderText("This chat belongs to an API client; replies go back to that client, not here."
+                                        if api else "Talk to the Brain…")
+        self.chat_hint.setText(
+            "Read-only: this is a conversation started by a program using your local API key. The Brain knows it is a "
+            "separate conversation and answers only that caller." if api else
+            "The Brain is always listening and knows which chat each message came from. Local commands start with / "
+            "(try /help). Chat never runs commands on this laptop.")
+        self._refresh_chat_list()
+        self._render_chat()
+
+    def _new_chat(self):
+        name, ok = QInputDialog.getText(self, "New chat", "Name this chat:")
+        if not ok:
+            return
+        n = sum(1 for c in self._chats if c.startswith("app:")) + 2
+        ch = "app:" + secrets.token_hex(3)
+        self._titles[ch] = name.strip()[:30] or f"Chat {n}"
+        self._ensure_chat(ch)
+        self.chat_list.setCurrentRow(self.chat_list.count() - 1)
+
     def _chat(self):
         text = self.chat_in.text().strip()
         self.chat_in.clear()
         if not text:
             return
-        reply = chat_reply(self.engine, text)      # engine echoes your message itself when it goes to the Brain
+        reply = chat_reply(self.engine, text, self._cur)     # the engine echoes your message into this chat itself
         if text.startswith("/") or reply != "Sent to the Brain.":
-            self._chat_items.append(("sys", reply))
+            self._chats[self._cur].append(("sys", reply))
             self._render_chat()
 
     def _stop_brain(self):
-        if self.engine.send_user_message("stop"):
-            self._chat_items.append(("sys", "Sent \"stop\" to the Brain."))
-        else:
-            self._chat_items.append(("sys", "Not connected - press Start first."))
+        ok = self.engine.send_user_message("stop", "app")
+        self._chats["app"].append(("sys", 'Sent "stop" to the Brain.' if ok else "Not connected - press Start first."))
         self._render_chat()
 
     def _render_chat(self):
         parts = []
-        for who, text in self._chat_items:
+        for who, text in self._chats.get(self._cur, []):
             t = _html.escape(text).replace("\n", "<br>")
             if who == "you":
                 parts.append(f'<table align="right" width="75%" cellpadding="9" style="margin:6px 0"><tr><td bgcolor="{theme.ACCENT}" style="color:white">{t}</td></tr></table><br clear="all">')
@@ -590,8 +660,14 @@ class MainWindow(QMainWindow):
 
     def _on_event(self, kind, data):
         if kind == "chat":
-            self._chat_items.append((data["who"], data["text"]))
-            self._render_chat()
+            ch = data.get("channel", "app")
+            self._ensure_chat(ch)
+            self._chats[ch].append((data["who"], data["text"]))
+            if ch == self._cur:
+                self._render_chat()
+            else:
+                self._unread.add(ch)
+                self._refresh_chat_list()
             if data["who"] == "brain":
                 if self.pages.currentIndex() != self._page_idx["chat"]:
                     self.nav["chat"].setText("Chat  ●")

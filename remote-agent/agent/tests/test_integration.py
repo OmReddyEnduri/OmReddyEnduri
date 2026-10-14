@@ -302,3 +302,25 @@ def test_binary_write_read_image_video_preview_download(stack, monkeypatch):
     v.plan["url"] = f"http://127.0.0.1:{srv2.server_port}/clip.mp4"; v.plan["path"] = str(ws / "dl" / "big.mp4")
     r = ex.execute(v, 20, 1000, threading.Event()); srv2.shutdown()
     assert r.status == "failed" and "size limit" in r.error and not (ws / "dl" / "big.mp4").exists()
+
+
+def test_channels_end_to_end(stack):
+    eng, brain, appr, cfg, ws, _ = stack
+    # a local-API conversation and an app conversation reach the Brain tagged with their own channel
+    assert eng.send_user_message("from the api", "local:toolA")
+    assert eng.send_user_message("from the app")
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        msgs = brain.get(f"/api/v1/messages?device_id={cfg.device_id}&limit=50").json()["messages"]
+        if len(msgs) >= 2: break
+        time.sleep(0.2)
+    ch = {m["text"]: m["channel"] for m in msgs}
+    assert ch == {"from the api": "local:toolA", "from the app": "app"}
+    # the Brain answers each conversation separately (and one reply belongs to a relay-API caller)
+    for text, channel in (("to api", "local:toolA"), ("to app", "app"), ("to someone else", "relay:bob")):
+        brain.post("/api/v1/messages", json={"device_id": cfg.device_id, "text": text, "channel": channel})
+    deadline = time.time() + 10
+    while time.time() < deadline and sum(1 for c in eng.chat if c["who"] == "brain") < 2: time.sleep(0.2)
+    time.sleep(0.8)
+    got = {(c["text"], c["channel"]) for c in eng.chat if c["who"] == "brain"}
+    assert got == {("to api", "local:toolA"), ("to app", "app")}        # relay:bob's reply never lands on the laptop

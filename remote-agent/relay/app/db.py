@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, create_engine
+from sqlalchemy import JSON, inspect, text, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 
@@ -67,6 +67,7 @@ class Message(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     device_id: Mapped[str] = mapped_column(String(64), ForeignKey("devices.id"), index=True)
     direction: Mapped[str] = mapped_column(String(8))  # "user" (laptop -> brain) | "brain" (brain -> laptop)
+    channel: Mapped[str] = mapped_column(String(64), default="app", server_default="app", index=True)
     text: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -86,6 +87,15 @@ class Memory(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+def _ensure_columns(engine) -> None:
+    """create_all never alters existing tables: add columns introduced after the first deploy."""
+    cols = {c["name"] for c in inspect(engine).get_columns("messages")}
+    if "channel" not in cols:
+        with engine.begin() as cx:
+            cx.execute(text("ALTER TABLE messages ADD COLUMN channel VARCHAR(64) NOT NULL DEFAULT 'app'"))
+            cx.execute(text("CREATE INDEX IF NOT EXISTS ix_messages_channel ON messages (channel)"))
+
+
 def make_session_factory(url: str):
     kw = {"pool_pre_ping": True}
     if url.startswith("sqlite"):
@@ -95,4 +105,5 @@ def make_session_factory(url: str):
             kw["poolclass"] = StaticPool
     engine = create_engine(url, **kw)
     Base.metadata.create_all(engine)
+    _ensure_columns(engine)
     return engine, sessionmaker(engine, expire_on_commit=False)

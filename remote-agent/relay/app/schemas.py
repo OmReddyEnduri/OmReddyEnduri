@@ -57,17 +57,20 @@ class Result(BaseModel):
 
 class UserMessage(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
+    channel: str = Field(default="app", pattern=r"^[A-Za-z0-9_.:-]{1,64}$")
 
 
 class BrainMessage(BaseModel):
     device_id: str
     text: str = Field(min_length=1, max_length=4000)
+    channel: str = Field(default="app", pattern=r"^[A-Za-z0-9_.:-]{1,64}$")  # reply goes ONLY to this conversation
 
 
 class ChatIn(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
     device_id: str | None = None
     wait: int = Field(default=20, ge=0, le=25)
+    chat_id: str = Field(default="default", pattern=r"^[A-Za-z0-9_.-]{1,40}$")   # separate conversations per id
 
 
 class MemoryIn(BaseModel):

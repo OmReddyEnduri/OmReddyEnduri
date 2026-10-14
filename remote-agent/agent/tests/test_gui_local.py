@@ -121,11 +121,16 @@ def test_local_openai_endpoint(local):
     import time
     sent = []
     eng._client = object(); eng._stop.clear()
-    eng.send_user_message = lambda t: (sent.append(t), eng._add_chat("you", t), threading.Timer(0.3, lambda: eng._add_chat("brain", "pong")).start())[0] is None or True
+    eng.send_user_message = lambda t, ch="app": (sent.append((t, ch)), eng._add_chat("you", t, ch),
+                                                  threading.Timer(0.3, lambda: eng._add_chat("brain", "pong", ch)).start(),
+                                                  threading.Timer(0.1, lambda: eng._add_chat("brain", "wrong chat!", "app")).start()) and True
     r = c.post("/v1/chat/completions", headers=H, json={"messages": [{"role": "system", "content": "x"}, {"role": "user", "content": "ping"}], "wait": 5})
-    assert r.status_code == 200 and r.json()["choices"][0]["message"]["content"] == "pong" and sent == ["ping"]
-    r = c.post("/v1/chat/completions", headers=H, json={"messages": [{"role": "user", "content": "ping2"}], "wait": 5, "stream": True})
-    assert r.status_code == 200 and "data: [DONE]" in r.text
+    assert r.status_code == 200 and r.json()["choices"][0]["message"]["content"] == "pong"       # NOT "wrong chat!"
+    assert sent == [("ping", "local:default")]
+    r = c.post("/v1/chat/completions", headers={**H, "X-Chat-Id": "tool-b"}, json={"messages": [{"role": "user", "content": "yo"}], "wait": 5})
+    assert sent[-1] == ("yo", "local:tool-b") and r.json()["choices"][0]["message"]["content"] == "pong"
+    r = c.post("/v1/chat/completions", headers=H, json={"user": "alice smith!", "messages": [{"role": "user", "content": "k"}], "wait": 5, "stream": True})
+    assert sent[-1] == ("k", "local:alicesmith") and "data: [DONE]" in r.text
     assert c.post("/v1/chat/completions", headers=H, json={"messages": []}).status_code == 400
 
 
@@ -142,3 +147,21 @@ def test_v1_health_without_key_and_port_conflict(local):
         assert srv.failed and any("already in use" in n["msg"] for n in eng.notices)
     finally:
         s.close()
+
+
+def test_app_has_separate_chats_and_api_chats_are_read_only(local, tmp_path):
+    from laptop_agent.gui import Bridge, MainWindow
+    from laptop_agent.localserver import LocalServer
+    eng, _ = local
+    w = MainWindow(eng, Bridge(), LocalServer(eng, 8765))
+    w._on_event("chat", {"who": "you", "text": "hello", "channel": "app"})
+    w._on_event("chat", {"who": "you", "text": "api says hi", "channel": "local:scriptA"})
+    w._on_event("chat", {"who": "brain", "text": "answer to api", "channel": "local:scriptA"})
+    assert w.chat_list.count() == 2 and "API" in w.chat_list.item(1).text() and "●" in w.chat_list.item(1).text()
+    assert [t for _, t in w._chats["app"]] == ["hello"]                      # API traffic is not in the app chat
+    w.chat_list.setCurrentRow(1)
+    assert not w.chat_in.isEnabled() and "answer to api" in w.chatview.toPlainText() and "●" not in w.chat_list.item(1).text()
+    w.chat_list.setCurrentRow(0)
+    assert w.chat_in.isEnabled() and "api says hi" not in w.chatview.toPlainText()
+    w._titles["app:xyz"] = "Project X"; w._ensure_chat("app:xyz"); w._on_event("chat", {"who": "brain", "text": "in project x", "channel": "app:xyz"})
+    assert w.chat_list.count() == 3 and "Project X" in w.chat_list.item(2).text()

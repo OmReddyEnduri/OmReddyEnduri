@@ -39,7 +39,7 @@ const H={'X-Requested-With':'agent-ui'};
 async function g(){const r=await fetch('/api/state',{headers:H});if(!r.ok)return;const s=await r.json();
  st.innerHTML=`<b>Connection:</b> <span class="${s.state==='connected'?'ok':'bad'}">${esc(s.state)}</span>${s.paused?' (paused)':''}<br><b>Relay:</b> ${esc(s.relay_url)}<br><b>Device:</b> ${esc(s.device_id)}<br><b>Active task:</b> ${esc(s.active||'-')}<br><b>Security level:</b> ${esc(s.security_level)}<br><b>Workspaces:</b> ${esc(s.workspaces.join(', '))}`;
  tk.innerHTML='<tr><th>Request</th><th>Type</th><th>Risk</th><th>Status</th></tr>'+s.tasks.map(t=>`<tr><td>${esc(t.request_id)}</td><td>${esc(t.task_type)}</td><td>${esc(t.risk)}</td><td>${esc(t.status)}</td></tr>`).join('');
- ch.textContent=s.chat.map(m=>(m.who==='you'?'You: ':'Brain: ')+m.text).join('\\n');nt.textContent=s.notices.map(n=>n.level.toUpperCase()+': '+n.msg).join('\\n');tm.textContent=s.terminal.join('\\n')}
+ ch.textContent=s.chat.filter(m=>(m.channel||'app')==='app').map(m=>(m.who==='you'?'You: ':'Brain: ')+m.text).join('\\n');nt.textContent=s.notices.map(n=>n.level.toUpperCase()+': '+n.msg).join('\\n');tm.textContent=s.terminal.join('\\n')}
 async function c(a){const r=await fetch('/api/control/'+a,{method:'POST',headers:H});msg.textContent=r.ok?'':' failed';g()}
 async function send(){const t=document.getElementById('in').value;if(!t)return;document.getElementById('in').value='';
  const r=await fetch('/api/chat',{method:'POST',headers:{...H,'Content-Type':'application/json'},body:JSON.stringify({text:t})});
@@ -51,13 +51,13 @@ HELP = ("Type normally to talk to the Brain. Local commands start with /: /statu
         "/disconnect /start /tasks /last /workspaces /help.\nThis chat cannot run commands or approve operations.")
 
 
-def chat_reply(engine: AgentEngine, text: str) -> str:
+def chat_reply(engine: AgentEngine, text: str, channel: str = "app") -> str:
     """Plain text goes to the Brain (as a message, never executed). '/command' runs a fixed local command."""
     text = text.strip()
     if not text:
         return ""
     if not text.startswith("/"):
-        return "Sent to the Brain." if engine.send_user_message(text) else "Not connected — press Start first."
+        return "Sent to the Brain." if engine.send_user_message(text, channel) else "Not connected — press Start first."
     cmd = text[1:].strip().lower()
     if cmd == "help":
         return HELP
@@ -184,10 +184,15 @@ def create_local_app(engine: AgentEngine, secret: str, port: int) -> FastAPI:
         if not text.strip():
             raise HTTPException(400, "no user message")
         wait = max(0, min(int(body.get("wait", 25)), 60))
+        # Each API conversation is its own channel: the OpenAI `user` field or an X-Chat-Id header names it.
+        # Replies go back ONLY to this caller; they never appear in the app's own chat.
+        raw = str(body.get("user") or request.headers.get("x-chat-id") or "default")
+        chat_id = "".join(ch for ch in raw if ch.isalnum() or ch in "_.-")[:40] or "default"
+        channel = f"local:{chat_id}"
         t0 = time.time()
-        if not engine.send_user_message(text):
+        if not engine.send_user_message(text, channel):
             raise HTTPException(503, "agent is not connected to the relay")
-        reply = await _await_reply(engine, t0, wait)
+        reply = await _await_reply(engine, t0, wait, channel)
         out = reply or "(delivered to the Brain; no reply yet - it will appear in the app chat)"
         cid, now = f"chatcmpl-{secrets.token_hex(6)}", int(time.time())
         if body.get("stream"):
@@ -205,14 +210,14 @@ def create_local_app(engine: AgentEngine, secret: str, port: int) -> FastAPI:
     return app
 
 
-async def _await_reply(engine: AgentEngine, t0: float, wait: int) -> str:
+async def _await_reply(engine: AgentEngine, t0: float, wait: int, channel: str) -> str:
     import asyncio
     end = time.time() + wait
     while time.time() < end:
-        new = [c for c in list(engine.chat) if c["who"] == "brain" and c["ts"] > t0]
+        new = [c for c in list(engine.chat) if c["who"] == "brain" and c["ts"] > t0 and c.get("channel") == channel]
         if new:
             await asyncio.sleep(1.5)       # let a multi-part reply finish arriving
-            new = [c for c in list(engine.chat) if c["who"] == "brain" and c["ts"] > t0]
+            new = [c for c in list(engine.chat) if c["who"] == "brain" and c["ts"] > t0 and c.get("channel") == channel]
             return "\n\n".join(c["text"] for c in new)
         await asyncio.sleep(0.3)
     return ""
