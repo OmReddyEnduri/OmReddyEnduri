@@ -80,6 +80,9 @@ class Router:
                 self.inflight.pop(channel, None)
                 self._spawn(self._broadcast_stop, channel, local_id)
                 return True
+            if not self.agents:        # nobody ever registered: a single "classic" Brain polls unaddressed messages
+                self._spawn(self._send_unaddressed, channel, text, local_id)
+                return True
             called = self._called(text)
             agent = None
             if called:
@@ -131,7 +134,18 @@ class Router:
                                       "warned": False, "noted": False, "handoffs": handoffs}
         self.engine._emit("routed", {"channel": channel, "agent": agent})
 
+    def _send_unaddressed(self, channel, text, local_id):
+        try:
+            self.client.send_message(text, channel)
+            self.store.update_message(local_id, status="sent")
+        except Exception as e:
+            self.store.update_message(local_id, status="queued")
+            self.engine.notify("warning", f"Could not deliver the message: {e}")
+
     def _broadcast_stop(self, channel, local_id):
+        if not self.agents:            # classic single Brain
+            self._send_unaddressed(channel, "stop", local_id)
+            return
         sent = 0
         for a in list(self.agents.values()):
             try:

@@ -211,3 +211,17 @@ def test_reassign_moves_open_work_now(rig):
     relay.pickup("nova"); r.sync_once()
     r.reassign("app:x")
     assert relay.msgs[2]["to"] == "atlas" and "reassigned by you" in relay.msgs[2]["context"]["handoff"]["reason"]
+
+
+def test_classic_single_brain_still_works_until_an_agent_registers(tmp_path):
+    relay = FakeRelay()                       # NO agent has ever registered (a Brain that does not call /agents/hello)
+    eng = Eng(relay); store = ChatStore(tmp_path / "c.db")
+    r = Router(eng, store); r.inline = True; r.sync_once()
+    assert r.route_user_message("hello brain", "app")
+    assert relay.msgs[1]["to"] is None and relay.msgs[1]["text"] == "hello brain"        # unaddressed: a classic Brain can read it
+    assert not any("No agent is online" in m["text"] for m in store.messages("app"))
+    r.route_user_message("stop", "app")
+    assert relay.msgs[2]["to"] is None and relay.msgs[2]["text"] == "stop"
+    relay.add_agent("nova", "Nova"); r.sync_once()                                         # first agent registers -> multi-agent mode
+    r.route_user_message("now addressed", "app")
+    assert relay.msgs[3]["to"] == "nova"
