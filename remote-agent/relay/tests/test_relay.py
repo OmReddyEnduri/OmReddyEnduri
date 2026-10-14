@@ -169,3 +169,11 @@ def test_time_endpoint_ist(env):
     assert c.get("/api/v1/time").status_code == 401
     r = c.get("/api/v1/time", headers=H(BRAIN)).json()
     assert r["ist"].endswith("+05:30") and r["utc"].endswith("+00:00") and "IST" in r["ist_human"]
+
+
+def test_memory_accepts_sloppy_llm_input(env):
+    c, *_ = env
+    r = c.post("/api/v1/memory", headers=H(BRAIN), json={"kind": "Note", "title": "Run window", "body": "x" * 9000,
+                                                         "tags": ["run-window", "ist"], "pinned": True})
+    assert r.status_code == 201 and r.json()["tags"] == "run-window, ist"
+    assert c.post("/api/v1/memory", headers=H(BRAIN), json={"kind": "weird", "title": "x"}).status_code == 422

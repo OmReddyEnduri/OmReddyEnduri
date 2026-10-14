@@ -71,6 +71,45 @@ class ChatIn(BaseModel):
 
 
 class MemoryIn(BaseModel):
+    """Lenient on purpose: an LLM client sends tags as a list, long bodies, upper-case kinds, etc."""
+    kind: Literal["note", "preference", "skill", "lesson", "project"]
+    title: str = Field(min_length=1, max_length=200)
+    body: str = Field(default="", max_length=4000)
+    tags: str = Field(default="", max_length=200)
+    pinned: bool | None = None   # None = leave unchanged on update
+
+    @field_validator("kind", mode="before")
+    @classmethod
+    def _kind(cls, v):
+        return v.strip().lower() if isinstance(v, str) else v
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _title(cls, v):
+        return str(v).strip()[:200] if v is not None else v
+
+    @field_validator("body", mode="before")
+    @classmethod
+    def _body(cls, v):
+        return "" if v is None else str(v)[:4000]
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _tags(cls, v):
+        if v is None:
+            return ""
+        if isinstance(v, (list, tuple)):
+            v = ", ".join(str(x) for x in v)
+        return str(v)[:200]
+
+
+class ChatIn(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
+    device_id: str | None = None
+    wait: int = Field(default=20, ge=0, le=25)
+
+
+class MemoryIn(BaseModel):
     kind: Literal["note", "preference", "skill", "lesson", "project"]
     title: str = Field(min_length=1, max_length=200)
     body: str = Field(default="", max_length=4000)
