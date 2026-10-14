@@ -7,7 +7,7 @@ from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QDialog, QFrame, QGridLayout,
                                QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
-                               QPushButton, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
+                               QPushButton, QScrollArea, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
 from . import theme
 from .engine import AgentEngine, ApprovalRequest
@@ -36,43 +36,60 @@ def _fmt_args(a: dict) -> str:
 
 
 class ApprovalDialog(QDialog):
-    """APPROVE ONCE / REJECT / CANCEL. Default and Esc = REJECT. No timeout, ever."""
+    """APPROVE ONCE / REJECT / CANCEL. Default and Esc = REJECT. No timeout, ever.
+    Details scroll in the middle; the three buttons are pinned at the bottom and always visible."""
     def __init__(self, req: ApprovalRequest, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Permission required")
         self.setModal(True)
-        self.setMinimumWidth(700)
         self.answer = "cancel"
-        root = QVBoxLayout(self)
-        root.setContentsMargins(22, 20, 22, 20)
-        root.setSpacing(12)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(18, 16, 18, 16)
+        outer.setSpacing(10)
+
         head = QHBoxLayout()
-        icon = _label("⚠", "title")
-        icon.setStyleSheet(f"color:{theme.WARN};font-size:28px;")
+        icon = _label("⚠")
+        icon.setStyleSheet(f"color:{theme.WARN};font-size:24px;")
         head.addWidget(icon)
         col = QVBoxLayout()
-        col.addWidget(_label("The Brain wants to run something on your laptop", "title"))
-        col.addWidget(_label("Nothing happens unless you approve. Closing this window rejects it.", "muted"))
+        col.setSpacing(0)
+        t = _label("Allow this on your laptop?", "title")
+        t.setStyleSheet("font-size:16px;")
+        col.addWidget(t)
+        col.addWidget(_label(f"{req.operation}  ·  {req.reason}", "muted", wrap=True))
         head.addLayout(col, 1)
-        root.addLayout(head)
+        outer.addLayout(head)
 
-        def field(name, text, mono=True, h=56):
-            root.addWidget(_label(name.upper(), "caption"))
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        inner = QWidget()
+        body = QVBoxLayout(inner)
+        body.setContentsMargins(0, 0, 6, 0)
+        body.setSpacing(6)
+
+        def field(name, text, cap=140):
+            body.addWidget(_label(name.upper(), "caption"))
             box = QPlainTextEdit(text)
             box.setReadOnly(True)
-            box.setFixedHeight(h)
-            if h <= 48:
+            lines = min(text.count("\n") + 1, 9)
+            box.setFixedHeight(min(cap, 18 * lines + 22))
+            if lines <= 2 and len(text) < 70:
                 box.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-            root.addWidget(box)
-        field("Operation", req.operation, h=44)
-        field("Arguments", _fmt_args(req.arguments), h=150)
-        field("Working directory", req.cwd or "—", h=44)
-        field("Files affected", "\n".join(req.files) or "—", h=80)
-        field("Reason (from the Brain)", req.reason, h=56)
-        field("Expected impact", req.impact, h=56)
+            body.addWidget(box)
+        field("Operation", req.operation)
+        field("Arguments", _fmt_args(req.arguments), cap=170)
+        field("Working directory", req.cwd or "—")
+        field("Files affected", "\n".join(req.files) or "—", cap=110)
+        field("Reason (from the Brain)", req.reason)
+        field("Expected impact", req.impact)
         if req.preview:
-            field("Content / script preview", req.preview, h=150)
-        root.addWidget(_label(f"Request ID: {req.request_id}", "muted"))
+            field("Content / script preview", req.preview, cap=170)
+        body.addWidget(_label(f"Request ID: {req.request_id}", "muted"))
+        body.addStretch(1)
+        scroll.setWidget(inner)
+        outer.addWidget(scroll, 1)
+
         bar = QHBoxLayout()
         self.b_ok, self.b_no, self.b_cancel = (QPushButton("APPROVE ONCE"), QPushButton("REJECT"), QPushButton("CANCEL"))
         self.b_ok.setObjectName("approve")
@@ -80,14 +97,18 @@ class ApprovalDialog(QDialog):
         self.b_cancel.setObjectName("neutral")
         for b in (self.b_ok, self.b_no, self.b_cancel):
             b.setAutoDefault(False)
-            b.setMinimumHeight(42)
+            b.setMinimumHeight(44)
             bar.addWidget(b)
-        root.addLayout(bar)
+        outer.addLayout(bar)
         self.b_no.setDefault(True)
         self.b_no.setFocus()
         self.b_ok.clicked.connect(lambda: self._done("approve"))
         self.b_no.clicked.connect(lambda: self._done("reject"))
         self.b_cancel.clicked.connect(lambda: self._done("cancel"))
+
+        screen = (parent.screen() if parent else QApplication.primaryScreen()).availableGeometry()
+        self.resize(min(660, int(screen.width() * 0.92)), min(560, int(screen.height() * 0.88)))
+        self.move(screen.center().x() - self.width() // 2, screen.center().y() - self.height() // 2)
 
     def _done(self, a: str):
         self.answer = a
