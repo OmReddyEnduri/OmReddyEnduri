@@ -162,3 +162,10 @@ def test_memory_and_auto_lessons(env):
     assert c.get("/api/v1/memory", headers=H(dtok)).status_code == 403
     assert len(c.get("/api/v1/admin/overview", headers=H(ADMIN)).json()["memory"]) == 3
     assert c.delete(f"/api/v1/memory/{les[0]['id']}", headers=H(BRAIN)).status_code == 200
+
+
+def test_time_endpoint_ist(env):
+    c, *_ = env
+    assert c.get("/api/v1/time").status_code == 401
+    r = c.get("/api/v1/time", headers=H(BRAIN)).json()
+    assert r["ist"].endswith("+05:30") and r["utc"].endswith("+00:00") and "IST" in r["ist_human"]

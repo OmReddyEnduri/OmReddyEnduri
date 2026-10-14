@@ -172,6 +172,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def healthz():
         return {"ok": True, "database": engine.dialect.name}
 
+    @app.get("/api/v1/time")
+    def server_time(_=Depends(require_brain)):
+        """The Brain has no clock: this is its source of truth. IST = UTC+05:30."""
+        now = utcnow()
+        ist = now.astimezone(timezone(timedelta(hours=5, minutes=30)))
+        return {"utc": iso(now), "ist": ist.isoformat(), "ist_human": ist.strftime("%A %d %b %Y, %I:%M:%S %p IST"),
+                "epoch": int(now.timestamp())}
+
     # ---------------------------------------------------------------- devices
     @app.post("/api/v1/devices/register", status_code=201)
     def register(body: schemas.Register, db: Session = Depends(get_db), _=Depends(require_enroll)):
