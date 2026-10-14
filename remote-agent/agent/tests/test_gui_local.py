@@ -87,3 +87,43 @@ def test_chat_slash_commands_and_no_execution(local):
     assert "Not connected" in chat_reply(eng, "run echo hi")        # plain text goes to the Brain, never executed
     assert "desktop window" in chat_reply(eng, "/level")
     assert chat_reply(eng, "/workspaces")
+
+
+def test_preview_pane_in_app(tmp_path):
+    from PIL import Image
+    from laptop_agent.gui import PreviewPane
+    pp = PreviewPane()
+    Image.new("RGB", (400, 300), (10, 100, 200)).save(tmp_path / "a.png")
+    (tmp_path / "p.html").write_text("<h1>Hello</h1><p>basic</p>")
+    (tmp_path / "n.md").write_text("# Title\n\ntext")
+    (tmp_path / "t.txt").write_text("plain")
+    ok, msg = pp.show_plan({"path": str(tmp_path / "a.png")}); assert ok and "image" in msg and pp._pix is not None
+    ok, msg = pp.show_plan({"path": str(tmp_path / "p.html")}); assert ok and "app" in msg and "Hello" in pp.text.toPlainText()
+    ok, msg = pp.show_plan({"path": str(tmp_path / "n.md")}); assert ok and "Title" in pp.text.toPlainText()
+    ok, msg = pp.show_plan({"path": str(tmp_path / "t.txt")}); assert ok and pp.text.toPlainText() == "plain"
+    ok, msg = pp.show_plan({"path": str(tmp_path / "x.xyz")}); assert not ok
+    (tmp_path / "bad.png").write_bytes(b"not an image")
+    ok, msg = pp.show_plan({"path": str(tmp_path / "bad.png")}); assert not ok
+
+
+def test_local_openai_endpoint(local):
+    eng, c = local
+    eng.cfg.local_api_key = "lak_testkey"
+    H = {"Authorization": "Bearer lak_testkey"}
+    assert c.get("/v1/models").status_code == 401
+    assert c.get("/v1/models", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert c.get("/v1/models", headers=H).json()["data"][0]["id"] == "brain"
+    assert c.get("/v1/models", headers={**H, "Host": "evil.com"}).status_code == 400
+    # not connected -> 503, nothing sent
+    r = c.post("/v1/chat/completions", headers=H, json={"messages": [{"role": "user", "content": "hi"}], "wait": 1})
+    assert r.status_code == 503
+    # connected: message goes out, Brain reply is returned in OpenAI format
+    import time
+    sent = []
+    eng._client = object(); eng._stop.clear()
+    eng.send_user_message = lambda t: (sent.append(t), eng._add_chat("you", t), threading.Timer(0.3, lambda: eng._add_chat("brain", "pong")).start())[0] is None or True
+    r = c.post("/v1/chat/completions", headers=H, json={"messages": [{"role": "system", "content": "x"}, {"role": "user", "content": "ping"}], "wait": 5})
+    assert r.status_code == 200 and r.json()["choices"][0]["message"]["content"] == "pong" and sent == ["ping"]
+    r = c.post("/v1/chat/completions", headers=H, json={"messages": [{"role": "user", "content": "ping2"}], "wait": 5, "stream": True})
+    assert r.status_code == 200 and "data: [DONE]" in r.text
+    assert c.post("/v1/chat/completions", headers=H, json={"messages": []}).status_code == 400

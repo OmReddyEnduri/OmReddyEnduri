@@ -11,6 +11,13 @@ STATUS_COLORS = {
 }
 
 QSS = f"""
+QFrame#sidebar {{ background: #0a0e13; border-right: 1px solid {BORDER}; }}
+QPushButton#nav {{ text-align: left; background: transparent; border: none; padding: 11px 14px; border-radius: 8px; color: {MUTED}; font-weight: 600; }}
+QPushButton#nav:hover {{ color: {TEXT}; background: {CARD}; }}
+QPushButton#nav:checked {{ color: {TEXT}; background: {CARD2}; }}
+QPushButton#stop {{ background: {BAD}; border-color: {BAD}; color: white; font-weight: 700; }}
+QTextBrowser {{ background: #0a0f14; border: 1px solid {BORDER}; border-radius: 8px; padding: 8px; }}
+QScrollArea {{ background: transparent; border: none; }}
 * {{ font-family: 'Segoe UI', 'Inter', 'SF Pro Text', 'DejaVu Sans', sans-serif; font-size: 13px; color: {TEXT}; }}
 QMainWindow, QDialog, QWidget#root {{ background: {BG}; }}
 QLabel#title {{ font-size: 20px; font-weight: 700; }}

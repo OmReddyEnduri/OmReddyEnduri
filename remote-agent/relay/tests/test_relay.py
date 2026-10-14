@@ -13,7 +13,7 @@ def H(t):
 
 @pytest.fixture
 def env():
-    s = Settings("sqlite:///:memory:", BRAIN, ADMIN, ENROLL, online_window_s=30, lost_window_s=90, queue_ttl_s=900)
+    s = Settings("sqlite:///:memory:", BRAIN, ADMIN, ENROLL, "u" * 32, online_window_s=30, lost_window_s=90, queue_ttl_s=900)
     app = create_app(s)
     with TestClient(app) as c:
         r = c.post("/api/v1/devices/register", json={"name": "lap", "info": {"os": "x"}}, headers=H(ENROLL))
@@ -126,3 +126,39 @@ def test_two_way_messages(env):
     assert c.post("/api/v1/messages", json={"device_id": dev, "text": "x"}, headers=H(dtok)).status_code == 403
     allm = c.get(f"/api/v1/messages?device_id={dev}&direction=all", headers=H(BRAIN)).json()["messages"]
     assert [m["direction"] for m in allm] == ["user", "brain"]
+
+
+def test_user_api_chat(env):
+    c, dev, dtok, _ = env
+    U = "u" * 32
+    assert c.post("/api/v1/chat", json={"text": "hi", "wait": 0}).status_code == 401
+    assert c.post("/api/v1/chat", json={"text": "hi", "wait": 0}, headers=H(BRAIN)).status_code == 403
+    r = c.post("/api/v1/chat", json={"text": "hello from my key", "wait": 0}, headers=H(U))
+    assert r.status_code == 201 and r.json()["replies"] == [] and r.json()["device_id"] == dev
+    got = c.get(f"/api/v1/messages?device_id={dev}", headers=H(BRAIN)).json()["messages"]
+    assert got[0]["text"] == "hello from my key"                       # Brain sees it as a user message
+    c.post("/api/v1/messages", json={"device_id": dev, "text": "pong"}, headers=H(BRAIN))
+    hist = c.get("/api/v1/chat", headers=H(U)).json()["messages"]
+    assert [m["text"] for m in hist] == ["hello from my key", "pong"]
+
+
+def test_memory_and_auto_lessons(env):
+    c, dev, dtok, _ = env
+    r = c.post("/api/v1/memory", json={"kind": "preference", "title": "Workspace", "body": "Only use D:/om", "pinned": True}, headers=H(BRAIN))
+    assert r.status_code == 201
+    c.post("/api/v1/memory", json={"kind": "preference", "title": "Workspace", "body": "Only D:/om, never C:"}, headers=H(BRAIN))  # upsert
+    c.post("/api/v1/memory", json={"kind": "skill", "title": "Build C++", "body": "write_files then run_command g++"}, headers=H(BRAIN))
+    assert len(c.get("/api/v1/memory?kind=preference", headers=H(BRAIN)).json()["entries"]) == 1
+    # blocked task -> automatic lesson, deduped with a counter
+    for i in (1, 2):
+        c.post("/api/v1/tasks", json=mk(f"b{i}", dev, task_type="run_command", arguments={"argv": ["sudo", "ls"]}), headers=H(BRAIN))
+        c.get("/api/v1/agent/tasks/next", headers=H(dtok))
+        c.post(f"/api/v1/tasks/b{i}/decision", json={"decision": "blocked", "note": "blocked executable: sudo"}, headers=H(dtok))
+    les = c.get("/api/v1/memory?kind=lesson", headers=H(BRAIN)).json()["entries"]
+    assert len(les) == 1 and les[0]["count"] == 2 and "sudo" in les[0]["title"] and les[0]["source"] == "auto"
+    brief = c.get("/api/v1/memory/brief", headers=H(BRAIN)).json()
+    assert "PINNED" in brief["text"] and "Only D:/om, never C:" in brief["text"] and "LESSONS" in brief["text"] and "SKILLS" in brief["text"]
+    assert c.get("/api/v1/memory?q=g%2B%2B", headers=H(BRAIN)).json()["entries"][0]["title"] == "Build C++"
+    assert c.get("/api/v1/memory", headers=H(dtok)).status_code == 403
+    assert len(c.get("/api/v1/admin/overview", headers=H(ADMIN)).json()["memory"]) == 3
+    assert c.delete(f"/api/v1/memory/{les[0]['id']}", headers=H(BRAIN)).status_code == 200

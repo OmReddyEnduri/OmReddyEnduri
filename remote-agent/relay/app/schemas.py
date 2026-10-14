@@ -62,3 +62,17 @@ class UserMessage(BaseModel):
 class BrainMessage(BaseModel):
     device_id: str
     text: str = Field(min_length=1, max_length=4000)
+
+
+class ChatIn(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
+    device_id: str | None = None
+    wait: int = Field(default=20, ge=0, le=25)
+
+
+class MemoryIn(BaseModel):
+    kind: Literal["note", "preference", "skill", "lesson", "project"]
+    title: str = Field(min_length=1, max_length=200)
+    body: str = Field(default="", max_length=4000)
+    tags: str = Field(default="", max_length=200)
+    pinned: bool | None = None   # None = leave unchanged on update

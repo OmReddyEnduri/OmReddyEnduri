@@ -15,6 +15,7 @@ class Settings:
     brain_token: str
     admin_token: str
     enroll_token: str
+    user_token: str = ""            # optional: lets YOU talk to the Brain via /api/v1/chat
     online_window_s: int = 30        # heartbeat age that still counts as online
     lost_window_s: int = 90          # in-flight tasks fail after this much silence
     queue_ttl_s: int = 900           # queued tasks expire after this long
@@ -33,6 +34,7 @@ def load_settings() -> Settings:
         brain_token=_tok("BRAIN_API_TOKEN", True),
         admin_token=_tok("ADMIN_TOKEN", True),
         enroll_token=_tok("ENROLL_TOKEN", True),
+        user_token=_tok("USER_API_TOKEN", False),
         online_window_s=int(os.environ.get("ONLINE_WINDOW_SECONDS", 30)),
         lost_window_s=int(os.environ.get("LOST_WINDOW_SECONDS", 90)),
         queue_ttl_s=int(os.environ.get("QUEUE_TTL_SECONDS", 900)),

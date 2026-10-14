@@ -71,6 +71,21 @@ class Message(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class Memory(Base):
+    """The Brain's persistent memory: notes, preferences, skills (procedures) and lessons (mistakes)."""
+    __tablename__ = "memory"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String(16), index=True)     # note|preference|skill|lesson|project
+    title: Mapped[str] = mapped_column(String(200), index=True)
+    body: Mapped[str] = mapped_column(Text, default="")
+    tags: Mapped[str] = mapped_column(String(200), default="")
+    pinned: Mapped[bool] = mapped_column(Boolean, default=False)
+    source: Mapped[str] = mapped_column(String(8), default="brain")   # brain|auto|user
+    count: Mapped[int] = mapped_column(Integer, default=1)            # how often a lesson recurred
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 def make_session_factory(url: str):
     kw = {"pool_pre_ping": True}
     if url.startswith("sqlite"):

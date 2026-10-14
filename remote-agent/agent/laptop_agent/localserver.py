@@ -4,12 +4,14 @@ Defences: loopback bind only; per-launch secret (cookie, SameSite=Strict); Host 
 checks (DNS-rebinding / CSRF). Approvals are deliberately NOT exposed here: they happen only
 in the native dialog / console. The chat accepts a fixed command set and never executes input.
 """
+import json
 import secrets
 import threading
+import time
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 
 from .engine import AgentEngine
 
@@ -147,7 +149,65 @@ def create_local_app(engine: AgentEngine, secret: str, port: int) -> FastAPI:
         text = str(body.get("text", ""))[:200]
         return JSONResponse({"reply": chat_reply(engine, text)})
 
+    # ---- OpenAI-compatible endpoint: talk to the Brain from any local tool, authenticated by an API key
+    def v1_guard(request: Request):
+        if request.headers.get("host", "") not in ok_hosts:
+            raise HTTPException(400, "bad host")
+        key = engine.cfg.local_api_key
+        auth = request.headers.get("authorization", "")
+        if not key or not auth.lower().startswith("bearer ") or not secrets.compare_digest(auth[7:].strip(), key):
+            raise HTTPException(401, "invalid API key")
+
+    @app.get("/v1/models")
+    def v1_models(request: Request):
+        v1_guard(request)
+        return {"object": "list", "data": [{"id": "brain", "object": "model", "owned_by": "laptop-agent"}]}
+
+    @app.post("/v1/chat/completions")
+    async def v1_chat(request: Request):
+        v1_guard(request)
+        body = await request.json()
+        text = ""
+        for m in reversed(body.get("messages") or []):
+            if m.get("role") == "user":
+                c = m.get("content")
+                text = c if isinstance(c, str) else " ".join(p.get("text", "") for p in c or [] if isinstance(p, dict))
+                break
+        if not text.strip():
+            raise HTTPException(400, "no user message")
+        wait = max(0, min(int(body.get("wait", 25)), 60))
+        t0 = time.time()
+        if not engine.send_user_message(text):
+            raise HTTPException(503, "agent is not connected to the relay")
+        reply = await _await_reply(engine, t0, wait)
+        out = reply or "(delivered to the Brain; no reply yet - it will appear in the app chat)"
+        cid, now = f"chatcmpl-{secrets.token_hex(6)}", int(time.time())
+        if body.get("stream"):
+            def gen():
+                yield "data: " + json.dumps({"id": cid, "object": "chat.completion.chunk", "created": now, "model": "brain",
+                                             "choices": [{"index": 0, "delta": {"role": "assistant", "content": out}, "finish_reason": None}]}) + "\n\n"
+                yield "data: " + json.dumps({"id": cid, "object": "chat.completion.chunk", "created": now, "model": "brain",
+                                             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}) + "\n\n"
+                yield "data: [DONE]\n\n"
+            return StreamingResponse(gen(), media_type="text/event-stream")
+        return {"id": cid, "object": "chat.completion", "created": now, "model": "brain",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": out}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}
+
     return app
+
+
+async def _await_reply(engine: AgentEngine, t0: float, wait: int) -> str:
+    import asyncio
+    end = time.time() + wait
+    while time.time() < end:
+        new = [c for c in list(engine.chat) if c["who"] == "brain" and c["ts"] > t0]
+        if new:
+            await asyncio.sleep(1.5)       # let a multi-part reply finish arriving
+            new = [c for c in list(engine.chat) if c["who"] == "brain" and c["ts"] > t0]
+            return "\n\n".join(c["text"] for c in new)
+        await asyncio.sleep(0.3)
+    return ""
 
 
 class LocalServer:

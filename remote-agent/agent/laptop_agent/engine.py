@@ -72,6 +72,7 @@ class AgentEngine:
         self._cancel: dict[str, threading.Event] = {}
         self._lock = threading.RLock()
         self._client: RelayClient | None = None
+        self.preview_handler = None   # GUI sets this: (plan) -> (ok, message); previews render inside the app
 
     # ------------------------------------------------------------- UI plumbing
     def add_listener(self, fn: Callable[[str, object], None]):
@@ -354,8 +355,12 @@ class AgentEngine:
             return
         self._track(rid, status="running")
         self._term("run", f"{ttype} {rid}")
-        res = execute(v, int(task.get("timeout_seconds", 60)), self.cfg.max_output_bytes, cancel,
-                      lambda tag, s: self._term(tag, s), self.cfg.workspaces)
+        if ttype == "open_preview" and self.preview_handler:
+            ok, msg = self.preview_handler(v.plan)
+            res = ExecResult(stdout=msg) if ok else ExecResult("failed", 1, error=msg)
+        else:
+            res = execute(v, int(task.get("timeout_seconds", 60)), self.cfg.max_output_bytes, cancel,
+                          lambda tag, s: self._term(tag, s), self.cfg.workspaces)
         payload = self._payload(res)
         self.audit.write("result", request_id=rid, status=res.status, exit_code=res.exit_code)
         self._track(rid, status=res.status, exit_code=res.exit_code, error=res.error)

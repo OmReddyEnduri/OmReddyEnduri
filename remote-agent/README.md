@@ -52,6 +52,13 @@ Blocked actions stay blocked at every level. Lowering the level asks you to conf
 ## Reliability / safety
 Exponential backoff + jitter, bounded output (128 KB) with `output_truncated`, secret redaction (tokens, keys, `password=…`), process-tree kill on timeout/cancel/disconnect, duplicate `request_id` runs once, one task at a time, in-flight tasks fail with `device_disconnected` if the laptop goes silent for 90 s, scrubbed child environment, no shell strings (argv only).
 
+## Talking to the Brain, memory, previews
+- **App chat** (Chat tab) goes to the Brain; the Brain's replies appear there. The red **STOP the Brain** button sends the word "stop".
+- **Local endpoint** (OpenAI-compatible, 127.0.0.1 only): `http://127.0.0.1:8765/v1` with the API key shown on the app's **Connect** page (`POST /v1/chat/completions`, model `brain`).
+- **Relay endpoint** (works from anywhere, needs `USER_API_TOKEN` set on the relay): `POST https://laptop-relay.onrender.com/api/v1/chat` with `{"text":"..."}` and `Authorization: Bearer <USER_API_TOKEN>`; it waits up to 20 s for the Brain's reply. `GET /api/v1/chat` shows the conversation.
+- **Memory:** the Brain keeps notes, preferences, skills and lessons in the relay (`/api/v1/memory*`). Blocked, rejected and failed tasks are recorded as lessons automatically. View/delete entries on the dashboard's Memory tab.
+- **Previews** open in the app's Preview tab (images, text, markdown, basic HTML). Full JavaScript pages, video and PDF need `pip install PySide6-Addons` (large, ~200+ MB).
+
 ## Tests
 ```
 cd relay && pip install -r requirements.txt && pytest -q

@@ -11,14 +11,14 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from . import schemas
 from .auth import (get_db, hash_token, new_device_token, require_admin, require_brain,
-                   require_device, require_enroll)
+                   require_device, require_enroll, require_user)
 from .config import Settings, load_settings
-from .db import AuditLog, Device, Message, Task, make_session_factory, utcnow
+from .db import AuditLog, Device, Memory, Message, Task, make_session_factory, utcnow
 
 TERMINAL = {"completed", "failed", "timeout", "cancelled", "rejected", "blocked", "expired"}
 INFLIGHT = ("claimed", "running")
@@ -66,6 +66,53 @@ def task_json(t: Task, full: bool = True) -> dict:
         d.update(arguments=t.arguments, stdout=t.stdout, stderr=t.stderr,
                  output_truncated=t.output_truncated, data=t.result_data)
     return d
+
+
+MEM_LIMIT = 500
+
+
+def mem_json(m: Memory, full: bool = True) -> dict:
+    d = {"id": m.id, "kind": m.kind, "title": m.title, "tags": m.tags, "pinned": m.pinned,
+         "source": m.source, "count": m.count, "updated_at": iso(m.updated_at)}
+    if full:
+        d["body"] = m.body
+    return d
+
+
+def upsert_memory(db: Session, kind: str, title: str, body: str = "", tags: str = "", pinned=None,
+                  source: str = "brain", bump: bool = False) -> Memory:
+    m = db.scalars(select(Memory).where(Memory.kind == kind, Memory.title == title)).one_or_none()
+    if m is None:
+        if db.scalar(select(func.count(Memory.id))) >= MEM_LIMIT:  # drop the oldest unpinned auto/lesson entry
+            old = db.scalars(select(Memory).where(Memory.pinned.is_(False)).order_by(Memory.updated_at).limit(1)).first()
+            if old:
+                db.delete(old)
+        m = Memory(kind=kind, title=title, body=body, tags=tags, pinned=bool(pinned), source=source)
+        db.add(m)
+    else:
+        if bump:
+            m.count += 1
+        if body:
+            m.body = body
+        if tags:
+            m.tags = tags
+        if pinned is not None:
+            m.pinned = pinned
+        m.updated_at = utcnow()
+    return m
+
+
+def auto_lesson(db: Session, t: Task, status: str, why: str | None):
+    """Record every blocked/rejected/failed task as a lesson so the Brain doesn't repeat the mistake."""
+    a = t.arguments or {}
+    gist = {k: (str(v)[:160]) for k, v in a.items() if k in ("path", "argv", "url", "cwd", "manager", "packages", "dir", "globs", "interpreter")}
+    if t.task_type in ("write_files",):
+        gist = {"paths": [str(f.get("path"))[:120] for f in (a.get("files") or [])[:5] if isinstance(f, dict)]}
+    why = (why or "").strip()[:200]
+    title = f"{t.task_type} {status}: {why[:90] or 'no reason given'}"
+    body = (f"Seen on request {t.request_id}. Arguments (gist): {json.dumps(gist)[:500]}. Reason given: {why or 'n/a'}. "
+            "Do not repeat this as-is; choose a different structured approach or ask the user.")
+    upsert_memory(db, "lesson", title, body, tags=t.task_type, source="auto", bump=True)
 
 
 def sweep(db: Session, s: Settings) -> None:
@@ -264,6 +311,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             t.completed_at = now
         audit(db, f"device:{dev.id}", f"decision_{body.decision}", t.request_id, dev.id, body.note)
+        if new in ("blocked", "rejected"):
+            auto_lesson(db, t, new, body.note)
         db.commit()
         return task_json(t, full=False)
 
@@ -293,6 +342,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         t.completed_at = parse(body.completed_at) or utcnow()
         audit(db, f"device:{dev.id}", f"result_{body.status}", t.request_id, dev.id,
               f"exit={body.exit_code}")
+        if body.status in ("failed", "timeout"):
+            auto_lesson(db, t, body.status, body.error or (body.stderr or "")[-160:] or f"exit {body.exit_code}")
         db.commit()
         return task_json(t, full=False)
 
@@ -354,6 +405,100 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         db.commit()
         return msg_json(m)
 
+    # ------------------------------------------------------- brain memory
+    @app.get("/api/v1/memory/brief")
+    def memory_brief(db: Session = Depends(get_db), _=Depends(require_brain)):
+        """ONE call at session start: everything worth remembering, as a compact digest (<= ~6000 chars)."""
+        def pick(kind, n, order):
+            return db.scalars(select(Memory).where(Memory.kind == kind).order_by(*order).limit(n)).all()
+        pinned = db.scalars(select(Memory).where(Memory.pinned.is_(True)).order_by(Memory.updated_at.desc()).limit(20)).all()
+        sections = [("PINNED", pinned),
+                    ("USER PREFERENCES", pick("preference", 15, [Memory.updated_at.desc()])),
+                    ("LESSONS (mistakes to avoid)", pick("lesson", 20, [Memory.count.desc(), Memory.updated_at.desc()])),
+                    ("SKILLS (procedures that worked)", pick("skill", 15, [Memory.updated_at.desc()])),
+                    ("PROJECTS", pick("project", 10, [Memory.updated_at.desc()])),
+                    ("RECENT NOTES", pick("note", 10, [Memory.updated_at.desc()]))]
+        seen, out = set(), []
+        for name, rows in sections:
+            lines = []
+            for m in rows:
+                if m.id in seen:
+                    continue
+                seen.add(m.id)
+                body = " ".join((m.body or "").split())
+                lines.append(f"- [{m.id}] {m.title}" + (f" (x{m.count})" if m.count > 1 else "") + (f": {body[:300]}" if body else ""))
+            if lines:
+                out.append(f"## {name}\n" + "\n".join(lines))
+        text = "\n\n".join(out)[:6000] or "(memory is empty)"
+        return {"text": text, "total_entries": db.scalar(select(func.count(Memory.id)))}
+
+    @app.get("/api/v1/memory")
+    def memory_list(kind: str | None = None, q: str | None = None, limit: int = Query(30, ge=1, le=100),
+                    db: Session = Depends(get_db), _=Depends(require_brain)):
+        stmt = select(Memory).order_by(Memory.pinned.desc(), Memory.updated_at.desc()).limit(limit)
+        if kind:
+            stmt = stmt.where(Memory.kind == kind)
+        if q:
+            like = f"%{q.lower()}%"
+            stmt = stmt.where(func.lower(Memory.title).like(like) | func.lower(Memory.body).like(like)
+                              | func.lower(Memory.tags).like(like))
+        return {"entries": [mem_json(m) for m in db.scalars(stmt)]}
+
+    @app.post("/api/v1/memory", status_code=201)
+    def memory_save(body: schemas.MemoryIn, db: Session = Depends(get_db), _=Depends(require_brain)):
+        """Create or update (same kind+title = update). Keep entries short and free of secrets."""
+        m = upsert_memory(db, body.kind, body.title.strip(), body.body, body.tags, body.pinned, "brain")
+        audit(db, "brain", "memory_saved", detail=f"{body.kind}: {body.title[:80]}")
+        db.commit()
+        return mem_json(m)
+
+    @app.delete("/api/v1/memory/{mem_id}")
+    def memory_delete(mem_id: int, db: Session = Depends(get_db), _=Depends(require_brain)):
+        m = db.get(Memory, mem_id)
+        if not m:
+            raise HTTPException(404, "unknown memory id")
+        db.delete(m)
+        db.commit()
+        return {"ok": True}
+
+    # ------------------------------------------------- user <-> brain (API key)
+    def _chat_device(db: Session, device_id: str | None) -> Device:
+        q = select(Device).where(Device.revoked.is_(False))
+        if device_id:
+            q = q.where(Device.id == device_id)
+        dev = db.scalars(q.order_by(Device.last_seen.desc())).first()
+        if not dev:
+            raise HTTPException(404, "no such device")
+        return dev
+
+    @app.post("/api/v1/chat", status_code=201)
+    def user_chat(body: schemas.ChatIn, db: Session = Depends(get_db), _=Depends(require_user)):
+        """You (curl/script, any machine) -> Brain. Waits up to `wait` s for the Brain's next reply."""
+        import time
+        dev = _chat_device(db, body.device_id)
+        last_brain = db.scalars(select(Message.id).where(Message.device_id == dev.id, Message.direction == "brain")
+                                .order_by(Message.id.desc()).limit(1)).first() or 0
+        m = Message(device_id=dev.id, direction="user", text=body.text)
+        db.add(m)
+        audit(db, "user-api", "user_message", device_id=dev.id, detail=body.text[:200])
+        db.commit()
+        end, replies = time.monotonic() + body.wait, []
+        while True:
+            db.rollback()
+            replies = fetch_msgs(db, dev.id, ("brain",), last_brain, 20)
+            if replies or time.monotonic() >= end:
+                break
+            time.sleep(1)
+        return {"sent": msg_json(m), "device_id": dev.id, "replies": [msg_json(r) for r in replies]}
+
+    @app.get("/api/v1/chat")
+    def user_chat_history(after_id: int = 0, limit: int = Query(20, ge=1, le=100), device_id: str | None = None,
+                          db: Session = Depends(get_db), _=Depends(require_user)):
+        dev = _chat_device(db, device_id)
+        rows = fetch_msgs(db, dev.id, ("user", "brain"), after_id, limit)
+        return {"device_id": dev.id, "messages": [msg_json(r) for r in rows],
+                "last_id": rows[-1].id if rows else after_id}
+
     # ----------------------------------------------------------------- admin
     @app.get("/api/v1/admin/overview")
     def overview(db: Session = Depends(get_db), _=Depends(require_admin)):
@@ -371,9 +516,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "counts": {k: len(v) for k, v in groups.items()},
                 "tasks": {k: [task_json(t, full=False) for t in v] for k, v in groups.items()},
                 "history": [task_json(t, full=False) for t in tasks],
+                "memory": [mem_json(m) for m in db.scalars(select(Memory).order_by(Memory.updated_at.desc()).limit(200))],
                 "audit": [{"ts": iso(a.ts), "actor": a.actor, "event": a.event,
                            "request_id": a.request_id, "device_id": a.device_id,
                            "detail": a.detail} for a in logs]}
+
+    @app.delete("/api/v1/admin/memory/{mem_id}")
+    def admin_memory_delete(mem_id: int, db: Session = Depends(get_db), _=Depends(require_admin)):
+        m = db.get(Memory, mem_id)
+        if m:
+            db.delete(m)
+            db.commit()
+        return {"ok": True}
 
     @app.post("/api/v1/admin/devices/{device_id}/revoke")
     def revoke(device_id: str, db: Session = Depends(get_db), _=Depends(require_admin)):

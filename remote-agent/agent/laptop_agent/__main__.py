@@ -54,6 +54,8 @@ def cmd_run(a):
         sys.exit("Refusing to run as administrator/root. Start the agent as a normal user.")
     cfg = C.load()
     cfg.validate()
+    if C.ensure_local_key(cfg):
+        print("Generated your local API key (see the Connect page in the app).")
     from .audit import Audit
     from .engine import AgentEngine
     if a.headless:
@@ -65,6 +67,7 @@ def cmd_run(a):
         srv.start()
         eng.start()
         print(f"Headless agent running. Local UI: {srv.url}")
+        print(f"Local API: http://127.0.0.1:{cfg.ui_port}/v1  key: {cfg.local_api_key}")
         signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
         try:
             while eng.state not in ("auth_failed", "disconnected"):

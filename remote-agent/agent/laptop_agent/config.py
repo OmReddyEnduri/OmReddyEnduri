@@ -28,6 +28,7 @@ class Config:
     ui_port: int = 8765
     max_output_bytes: int = 128 * 1024
     max_task_seconds: int = 3600
+    local_api_key: str = ""            # key for the localhost /v1 endpoint (generated on first run)
     security_level: int = 2            # 1 low (ask least) .. 3 high (ask most)
 
     def validate(self) -> None:
@@ -64,6 +65,16 @@ def load() -> Config:
     cfg = Config(**{k: v for k, v in data.items() if k in Config.__dataclass_fields__})
     cfg.relay_url = cfg.relay_url.rstrip("/")
     return cfg
+
+
+def ensure_local_key(cfg: Config) -> bool:
+    """Generate the localhost API key on first run. Returns True if a new key was made."""
+    if cfg.local_api_key:
+        return False
+    import secrets
+    cfg.local_api_key = "lak_" + secrets.token_urlsafe(30)
+    save(cfg)
+    return True
 
 
 def save(cfg: Config) -> Path:

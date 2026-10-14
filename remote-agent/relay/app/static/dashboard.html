@@ -17,7 +17,7 @@ input,button{font:inherit;padding:6px 8px;border:1px solid var(--bd);border-radi
 <div id="login" class="card">Admin token: <input id="tok" type="password" size="28" autocomplete="off"> <button id="go">Sign in</button> <div id="err" class="off"></div></div>
 <div id="app" hidden>
 <div id="devs"></div>
-<div class="tabs"><button data-t="active">Active</button><button data-t="completed">Completed</button><button data-t="failed">Failed</button><button data-t="rejected">Rejected</button><button data-t="history">History</button><button data-t="audit">Audit</button></div>
+<div class="tabs"><button data-t="active">Active</button><button data-t="completed">Completed</button><button data-t="failed">Failed</button><button data-t="rejected">Rejected</button><button data-t="history">History</button><button data-t="memory">Memory</button><button data-t="audit">Audit</button></div>
 <div id="view"></div>
 </div>
 <script>
@@ -30,10 +30,11 @@ function render(){
  $('#devs').innerHTML='<h2>Devices</h2>'+data.devices.map(d=>`<div class="card"><b>${esc(d.name)}</b> <code>${esc(d.device_id)}</code> — <span class="${d.online?'on':'off'}">${d.online?'ONLINE ('+esc(d.agent_state)+')':'OFFLINE'}</span>${d.revoked?' <span class="off">REVOKED</span>':''}<br><span class="mut">last heartbeat: ${esc(d.last_heartbeat||'never')} · ${esc(JSON.stringify(d.info))}</span><br>${d.revoked?'':`<button data-rev="${esc(d.device_id)}">Revoke token</button>`}</div>`).join('')||'<div class="mut">No devices</div>';
  document.querySelectorAll('[data-t]').forEach(b=>b.classList.toggle('sel',b.dataset.t===tab));
  let h='';
- if(tab==='audit'){h='<table><tr><th>Time</th><th>Actor</th><th>Event</th><th>Request</th><th>Detail</th></tr>'+data.audit.map(a=>`<tr><td>${esc(a.ts)}</td><td>${esc(a.actor)}</td><td>${esc(a.event)}</td><td>${esc(a.request_id)}</td><td>${esc(a.detail)}</td></tr>`).join('')+'</table>'}
+ if(tab==='memory'){h='<table><tr><th>Kind</th><th>Title</th><th>Note</th><th>x</th><th></th></tr>'+data.memory.map(m=>`<tr><td>${esc(m.kind)}${m.pinned?' 📌':''}</td><td>${esc(m.title)}</td><td>${esc(m.body)}</td><td>${esc(m.count)}</td><td><button data-mem="${m.id}">Delete</button></td></tr>`).join('')+'</table>'}
+ else if(tab==='audit'){h='<table><tr><th>Time</th><th>Actor</th><th>Event</th><th>Request</th><th>Detail</th></tr>'+data.audit.map(a=>`<tr><td>${esc(a.ts)}</td><td>${esc(a.actor)}</td><td>${esc(a.event)}</td><td>${esc(a.request_id)}</td><td>${esc(a.detail)}</td></tr>`).join('')+'</table>'}
  else{const rows=tab==='history'?data.history:data.tasks[tab];h=`<h2>${esc(tab)} (${rows.length})</h2><table><tr><th>Request</th><th>Type</th><th>Status</th><th>Risk</th><th>Reason</th><th>Created</th><th>Exit</th><th>Error</th></tr>`+rows.map(t=>`<tr><td>${esc(t.request_id)}</td><td>${esc(t.task_type)}</td><td>${esc(t.status)}</td><td>${esc(t.risk)}</td><td>${esc(t.reason)}</td><td>${esc(t.created_at)}</td><td>${esc(t.exit_code)}</td><td>${esc(t.error)}</td></tr>`).join('')+'</table>'}
  $('#view').innerHTML=h}
 $('#go').onclick=()=>{tok=$('#tok').value.trim();sessionStorage.setItem('adm',tok);load()};
-document.addEventListener('click',async e=>{const t=e.target.dataset;if(t.t){tab=t.t;render()}if(t.rev&&confirm('Revoke this device token? The laptop must be re-registered.')){await fetch('/api/v1/admin/devices/'+encodeURIComponent(t.rev)+'/revoke',{method:'POST',headers:{Authorization:'Bearer '+tok}});load()}});
+document.addEventListener('click',async e=>{const t=e.target.dataset;if(t.t){tab=t.t;render()}if(t.mem&&confirm('Delete this memory entry?')){await fetch('/api/v1/admin/memory/'+t.mem,{method:'DELETE',headers:{Authorization:'Bearer '+tok}});load()}if(t.rev&&confirm('Revoke this device token? The laptop must be re-registered.')){await fetch('/api/v1/admin/devices/'+encodeURIComponent(t.rev)+'/revoke',{method:'POST',headers:{Authorization:'Bearer '+tok}});load()}});
 if(tok)load();setInterval(()=>{if(tok&&!$('#app').hidden)load()},5000);
 </script></body></html>

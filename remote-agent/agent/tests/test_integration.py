@@ -24,7 +24,7 @@ class ScriptedApprover:
 @pytest.fixture
 def stack(tmp_path):
     s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
-    st = Settings(f"sqlite:///{tmp_path}/r.db", BRAIN, ADMIN, ENROLL, lost_window_s=90)
+    st = Settings(f"sqlite:///{tmp_path}/r.db", BRAIN, ADMIN, ENROLL, "", lost_window_s=90)
     srv = uvicorn.Server(uvicorn.Config(create_app(st), host="127.0.0.1", port=port, log_level="error"))
     th = threading.Thread(target=srv.run, daemon=True); th.start()
     url = f"http://127.0.0.1:{port}"

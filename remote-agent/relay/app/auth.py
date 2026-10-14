@@ -42,6 +42,15 @@ def require_admin(request: Request, authorization: str | None = Header(None)) ->
     return "admin"
 
 
+def require_user(request: Request, authorization: str | None = Header(None)) -> str:
+    tok = request.app.state.settings.user_token
+    if not tok:
+        raise HTTPException(503, "USER_API_TOKEN is not configured on the relay")
+    if not _eq(_bearer(authorization), tok):
+        raise HTTPException(403, "invalid user token")
+    return "user"
+
+
 def require_enroll(request: Request, authorization: str | None = Header(None)) -> str:
     if not _eq(_bearer(authorization), request.app.state.settings.enroll_token):
         raise HTTPException(403, "invalid enrollment token")
