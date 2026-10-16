@@ -22,6 +22,7 @@ class Router:
         self.waiting: list[dict] = []          # messages that could not be dispatched (no agent online)
         self.inflight: dict[str, dict] = {}    # channel -> {agent, since, text, ...} (user message awaiting an answer)
         self.seen_unrouted: dict[int, int] = {}
+        self.suspect: dict[str, float] = {}    # agent id -> until (it swallowed work and stayed silent: do not route to it)
         self.lock = threading.RLock()
         self.inline = False                    # tests: run dispatches synchronously
 
@@ -51,7 +52,10 @@ class Router:
 
     def pick(self, channel: str, exclude=()) -> str | None:
         chat = self.store.chat(channel) or {}
-        ok = {a["agent_id"] for a in self.agents.values() if a["online"] and a["agent_id"] not in exclude}
+        now = time.time()
+        self.suspect = {a: t for a, t in self.suspect.items() if t > now}
+        ok = {a["agent_id"] for a in self.agents.values()
+              if a["online"] and a["agent_id"] not in exclude and a["agent_id"] not in self.suspect}
         for choice in (chat.get("pinned"), chat.get("assigned")):      # pinned wins, then sticky
             if choice in ok:
                 return choice
@@ -190,6 +194,7 @@ class Router:
         if m.get("kind") == "notes":
             self.store.set_notes(ch, m["text"], agent)
             self.engine._emit("context", ch)
+            self.note_activity(ch, agent)
             return
         if self.store.has_relay_message(m["id"], "brain"):
             return
@@ -197,6 +202,7 @@ class Router:
         self.engine._add_chat("brain", m["text"], ch, agent)
         self.inflight.pop(ch, None)
         if agent:
+            self.suspect.pop(agent, None)
             self.store.set_assigned(ch, agent)
 
     def _route_inbound(self, m: dict):
@@ -274,10 +280,23 @@ class Router:
                 self.inflight.pop(ch)
                 self._handover(ch, f["text"], f["local_id"], f["agent"], "went offline", f["handoffs"] + 1,
                                {f["agent"]}, True)
-            elif now - f["since"] > self.engine.cfg.stall_warn_s and not f["warned"]:
-                f["warned"] = True
-                self.system_note(ch, f"{self.name_of(f['agent'])} has been quiet for {int(self.engine.cfg.stall_warn_s // 60)}+ "
-                                     "minutes on this chat. You can reassign it from the chat header.")
+            else:
+                silent = now - f["since"]
+                if silent > self.engine.cfg.stall_handoff_s:
+                    alt = self.pick(ch, exclude={f["agent"]})
+                    if alt is not None:
+                        # Online but silent: its listener may be alive while nobody is home (it fetched the message and
+                        # swallowed it). Hand the work over and stop routing to it until it shows signs of life.
+                        self.suspect[f["agent"]] = now + 600
+                        self.inflight.pop(ch)
+                        self._handover(ch, f["text"], f["local_id"], f["agent"],
+                                       f"stayed silent for {int(silent)}s (no reply, notes or tasks)",
+                                       f["handoffs"] + 1, {f["agent"]}, True)
+                        continue
+                if silent > self.engine.cfg.stall_warn_s and not f["warned"]:
+                    f["warned"] = True
+                    self.system_note(ch, f"{self.name_of(f['agent'])} has been quiet for {int(silent)}s on this chat. "
+                                         "You can reassign it from the chat header.")
 
     def _flush_waiting(self):
         if not self.waiting:
@@ -299,6 +318,8 @@ class Router:
 
     # ------------------------------------------------------------- activity + UI actions
     def note_activity(self, channel: str | None, agent: str | None):
+        if agent:
+            self.suspect.pop(agent, None)          # it is alive after all
         f = self.inflight.get(channel or "")
         if f and (agent is None or agent == f["agent"]):
             f["since"], f["warned"] = time.time(), False

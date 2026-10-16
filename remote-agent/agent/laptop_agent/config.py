@@ -30,7 +30,8 @@ class Config:
     max_task_seconds: int = 3600
     sync_interval_s: float = 2.5       # how often the router syncs with the relay
     ack_timeout_s: float = 30.0        # router: an agent must pick a message up within this, else hand it over
-    stall_warn_s: float = 180.0        # router: warn when an online agent is silent this long on a chat
+    stall_warn_s: float = 90.0         # router: warn when an online agent is silent this long on a chat
+    stall_handoff_s: float = 180.0     # router: hand the chat to a teammate when an agent stays silent this long
     local_api_key: str = ""            # key for the localhost /v1 endpoint (generated on first run)
     security_level: int = 2            # 1 low (ask least) .. 3 high (ask most)
 

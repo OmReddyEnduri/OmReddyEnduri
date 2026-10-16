@@ -51,7 +51,7 @@ class FakeRelay:
 
 
 class Cfg:
-    ack_timeout_s, stall_warn_s = 0.3, 0.6
+    ack_timeout_s, stall_warn_s, stall_handoff_s = 0.3, 0.3, 0.8
 
 
 class Eng:
@@ -87,7 +87,7 @@ def test_call_agents_by_name_and_sticky_least_loaded(rig):
     r.route_user_message("a follow-up with no name", "app:a")
     assert relay.msgs[3]["to"] == "atlas"                                        # sticky
     r.route_user_message("bob, who is bob", "app:c")                            # unknown name = plain text, normal pick
-    assert relay.msgs[4]["to"] in ("nova", "atlas")
+    assert max(relay.msgs.items())[1]["to"] in ("nova", "atlas")      # routable again (says() consumed an id)
     r.route_user_message("hi", "app:d"); r.route_user_message("hi", "app:e"); r.route_user_message("hi", "app:f")
     loads = [store.chat(c)["assigned"] for c in ("app:a", "app:b", "app:c", "app:d", "app:e", "app:f")]
     assert abs(loads.count("nova") - loads.count("atlas")) <= 1                  # work is balanced
@@ -225,3 +225,34 @@ def test_classic_single_brain_still_works_until_an_agent_registers(tmp_path):
     relay.add_agent("nova", "Nova"); r.sync_once()                                         # first agent registers -> multi-agent mode
     r.route_user_message("now addressed", "app")
     assert relay.msgs[3]["to"] == "nova"
+
+
+def test_online_but_silent_agent_loses_the_chat_and_is_not_routed_to_until_it_shows_life(rig):
+    relay, eng, store, r = rig
+    r.route_user_message("@nova build the page", "app:x"); r.sync_once()
+    relay.pickup("nova"); r.sync_once()                              # Nova's LISTENER fetched it (delivered) ...
+    assert 1 not in r.pending
+    time.sleep(0.5); r.sync_once()
+    assert any("quiet for" in t for t in sys_notes(store, "app:x"))  # warn first
+    assert len(relay.msgs) == 1
+    time.sleep(0.5); r.sync_once()                                    # ... but nobody answered: she stays "online" yet silent
+    m = relay.msgs[2]
+    assert m["to"] == "atlas" and "[handoff]" in m["text"] and "build the page" in m["text"]
+    assert "silent" in m["context"]["handoff"]["reason"]
+    # suspect: new chats do not go to Nova even though her listener still polls
+    r.route_user_message("hello", "app:y")
+    assert relay.msgs[3]["to"] == "atlas"
+    # a sign of life (notes) clears the suspicion
+    relay.says("nova", "app:x", "still here, working", kind="notes"); r.sync_once()
+    assert "nova" not in r.suspect
+    r.route_user_message("hello again", "app:z")
+    assert max(relay.msgs.items())[1]["to"] in ("nova", "atlas")      # routable again (says() consumed an id)
+
+
+def test_silent_agent_with_no_teammate_only_warns(rig):
+    relay, eng, store, r = rig
+    relay.agents["atlas"]["online"] = False; r.sync_once()
+    r.route_user_message("@nova work", "app:x"); r.sync_once()
+    relay.pickup("nova"); r.sync_once()
+    time.sleep(1.0); r.sync_once()
+    assert len(relay.msgs) == 1 and any("quiet for" in t for t in sys_notes(store, "app:x")) and "nova" not in r.suspect
