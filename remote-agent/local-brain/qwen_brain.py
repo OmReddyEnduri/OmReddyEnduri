@@ -3,6 +3,7 @@
 One file, standard library only. On Windows:
 
     python qwen_brain.py            # first time: installs everything on D:, asks for the Brain token, starts
+    python qwen_brain.py check      # run every check (and repair) and print the report
     python qwen_brain.py status     # is it up? which name did the relay give it?
     python qwen_brain.py run        # what autostart runs (you normally never type this)
     python qwen_brain.py stop       # stop it now (it comes back at next login)
@@ -10,13 +11,17 @@ One file, standard library only. On Windows:
 
 What it does
   1. Downloads llama.cpp (CUDA build, with its CUDA runtime DLLs) and the Qwen3.6-27B GGUF into D:\\om\\qwen.
-     The quantisation is picked from your VRAM (32 GB -> Q6_K). Downloads resume if interrupted.
-  2. Runs llama-server fully on the GPU (all layers offloaded) on 127.0.0.1:8080 with a private key.
-  3. Serves an OpenAI-compatible API on http://127.0.0.1:8766/v1 with its own `qwk_...` key (model "qwen").
-  4. Checks in with the Render relay (POST /api/v1/agents/hello), gets a name from the relay, keeps it across
-     reboots, listens to its inbox and works on the laptop through relay tasks, like the LLM Arena agents.
-  5. Puts a hidden launcher in your Startup folder so all of this starts by itself every time you log in,
-     and restarts llama-server if it ever crashes.
+     The quantisation is picked from your VRAM (32 GB -> Q6_K). Downloads resume if interrupted. No pip installs.
+  2. Every start, double-checks every piece (GPU, llama-server, model file size, autostart, relay token, disk) and
+     repairs what is missing or broken before it runs.
+  3. Runs llama-server fully on the GPU. Weights stream straight into VRAM (--no-mmap), so ~3 GB of RAM is enough.
+     After `idle_unload_min` (default 30) minutes with nothing to do it unloads the model to free the GPU, and loads
+     it again by itself the moment a message or API call needs it. Restarted if it crashes.
+  4. Serves an OpenAI-compatible API on http://127.0.0.1:8766/v1 with its own `qwk_...` key (model "qwen").
+  5. Joins the Render relay team as "Qwen" (@qwen), silently, and keeps that name across reboots. No idle work and
+     no heartbeat chatter: one open long-poll to the relay is its notification, and the relay answers it the instant
+     a message for Qwen arrives. Only then does the model wake up and work.
+  6. Puts a hidden launcher in your Startup folder, so all of this starts by itself every time you log in.
 """
 from __future__ import annotations
 
@@ -40,6 +45,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import zipfile
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -218,64 +224,186 @@ def install_model(quant: str) -> Path:
     return dest
 
 
-def install_autostart():
-    """Hidden launcher in the Startup folder: starts at every login, no admin rights needed."""
+def startup_file() -> Path | None:
     if not IS_WIN:
-        log.info("autostart is Windows-only; on this OS run `python qwen_brain.py run` from your init system")
-        return
+        return None
+    return Path(os.environ["APPDATA"]) / r"Microsoft\Windows\Start Menu\Programs\Startup\QwenBrain.vbs"
+
+
+def autostart_text() -> str:
     pyw = Path(sys.executable).with_name("pythonw.exe")
     py = pyw if pyw.exists() else Path(sys.executable)
-    startup = Path(os.environ["APPDATA"]) / r"Microsoft\Windows\Start Menu\Programs\Startup"
-    vbs = startup / "QwenBrain.vbs"
-    vbs.write_text('Set s = CreateObject("WScript.Shell")\r\n'
-                   f's.Run """{py}"" ""{BASE / "qwen_brain.py"}"" run", 0, False\r\n', "utf-8")
-    log.info("autostart installed: %s", vbs)
+    return ('Set s = CreateObject("WScript.Shell")\r\n'
+            f's.Run """{py}"" ""{BASE / "qwen_brain.py"}"" run", 0, False\r\n')
+
+
+def total_ram_gb() -> float:
+    try:
+        if IS_WIN:
+            import ctypes
+
+            class MS(ctypes.Structure):
+                _fields_ = [("len", ctypes.c_ulong), ("load", ctypes.c_ulong)] + \
+                           [(n, ctypes.c_ulonglong) for n in ("tp", "ap", "tf", "af", "tv", "av", "ax")]
+            m = MS()
+            m.len = ctypes.sizeof(MS)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m))
+            return m.tp / 2 ** 30
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2 ** 30
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def selfcheck(cfg: dict, repair: bool = True) -> tuple[bool, list[str]]:
+    """Check every piece and fix what is broken or missing. Runs at every start. Returns (can_run, report)."""
+    rep, ok = [], True
+
+    def line(good: bool, what: str):
+        rep.append(("OK    " if good else "FIXME ") + what)
+        (log.info if good else log.warning)("check: %s %s", "ok" if good else "PROBLEM", what)
+
+    if not cfg.get("brain_token"):
+        line(False, "no Brain token in config.json: run `python qwen_brain.py setup`")
+        return False, rep
+    for k, fresh in (("api_key", lambda: "qwk_" + secrets.token_urlsafe(24)), ("llama_key", lambda: secrets.token_urlsafe(24))):
+        cfg.setdefault(k, fresh())
+    cfg.setdefault("api_host", "127.0.0.1")
+    cfg.setdefault("think", True)
+    cfg.setdefault("idle_unload_min", 30)
+
+    gpu = None
+    try:
+        gpu = gpu_info()
+        line(True, f"GPU {gpu['name']}, {gpu['vram_gb']:.0f} GB VRAM, driver CUDA {gpu['cuda']}")
+    except SystemExit as e:
+        line(False, str(e))
+    line(True, f"RAM {total_ram_gb():.1f} GB (weights go straight to VRAM, so a few GB is enough)")
+
+    exe = Path(cfg.get("llama_server", ""))
+    if not exe.is_file() and repair and gpu:
+        try:
+            cfg["llama_server"] = str(install_llama_cpp(gpu["cuda"]))
+            exe = Path(cfg["llama_server"])
+        except (Exception, SystemExit) as e:  # noqa: BLE001  (offline at boot, GitHub down...)
+            log.warning("llama.cpp install failed: %s", e)
+    line(exe.is_file(), f"llama-server at {exe}")
+    ok &= exe.is_file()
+
+    model = Path(cfg.get("model", ""))
+    good = model.is_file() and (not cfg.get("model_size") or model.stat().st_size == cfg["model_size"])
+    if not good and repair and cfg.get("quant"):
+        try:
+            model = install_model(cfg["quant"])    # resumes a partial file, re-fetches a damaged one
+            cfg.update(model=str(model), model_size=model.stat().st_size)
+            good = True
+        except (Exception, SystemExit) as e:  # noqa: BLE001
+            log.warning("model download failed: %s", e)
+    line(good, f"model {model.name or '?'} ({human(model.stat().st_size) if model.is_file() else 'missing'})")
+    ok &= good
+    if gpu and good:
+        cfg["fits_gpu"] = gpu["vram_gb"] * 2 ** 30 > model.stat().st_size + 2 * 2 ** 30
+
+    src, me = Path(cfg.get("source_script", "")), BASE / "qwen_brain.py"
+    if src.is_file() and src.resolve() != me.resolve() and (not me.exists() or src.read_bytes() != me.read_bytes()):
+        shutil.copy2(src, me)                      # picked up a `git pull`: the new code runs from the next start
+        line(True, f"updated {me} from {src}")
+    elif not me.exists():
+        shutil.copy2(Path(__file__).resolve(), me)
+
+    sf = startup_file()
+    if sf is not None:
+        if repair and (not sf.exists() or sf.read_text("utf-8", errors="replace") != autostart_text()):
+            sf.write_text(autostart_text(), "utf-8")
+        line(sf.exists(), f"autostart at login: {sf}")
+
+    free = shutil.disk_usage(BASE.anchor or BASE).free
+    line(free > 2e9, f"free on {BASE.anchor or BASE}: {human(free)}")
+
+    try:
+        http_json("GET", cfg.get("relay_url", DEFAULT_RELAY) + "/api/v1/time",
+                  headers={"Authorization": f"Bearer {cfg['brain_token']}"}, timeout=70)
+        line(True, "relay reachable, token accepted")
+    except urllib.error.HTTPError as e:
+        line(False, f"relay refused the Brain token ({e.code}): run `python qwen_brain.py setup`")
+        ok = ok and e.code not in (401, 403)
+    except Exception as e:  # noqa: BLE001
+        line(False, f"relay not reachable yet ({e}); it keeps retrying")
+    save_json(CONFIG, cfg)
+    return ok, rep
 
 
 def setup(args):
     BASE.mkdir(parents=True, exist_ok=True)
     cfg = load_cfg()
-    free = shutil.disk_usage(BASE.anchor or BASE).free
     gpu = gpu_info()
-    quant, ctx = (args.quant, args.ctx or 32768) if args.quant else pick_quant(gpu["vram_gb"])
-    log.info("GPU %s, %.0f GB VRAM, driver CUDA %s -> %s, context %d; free on %s: %s",
-             gpu["name"], gpu["vram_gb"], gpu["cuda"], quant, ctx, BASE.anchor, human(free))
-    if free < 30e9 and not (BASE / "models" / f"{MODEL_PREFIX}-{quant}.gguf").exists():
+    if args.quant or not cfg.get("quant"):
+        quant, ctx = (args.quant, args.ctx or 32768) if args.quant else pick_quant(gpu["vram_gb"])
+        if quant != cfg.get("quant"):
+            cfg.pop("model_size", None)
+            cfg["model"] = str(BASE / "models" / f"{MODEL_PREFIX}-{quant}.gguf")
+        cfg.update(quant=quant, ctx=ctx)
+    free = shutil.disk_usage(BASE.anchor or BASE).free
+    log.info("GPU %s, %.0f GB VRAM -> %s, context %d; free on %s: %s",
+             gpu["name"], gpu["vram_gb"], cfg["quant"], cfg["ctx"], BASE.anchor, human(free))
+    if free < 30e9 and not Path(cfg["model"]).exists():
         raise SystemExit(f"Need about 30 GB free on {BASE.anchor}, have {human(free)}.")
-
-    if not cfg.get("brain_token"):
-        cfg["relay_url"] = args.relay_url or DEFAULT_RELAY
-        cfg["brain_token"] = getpass.getpass("Brain API token (the Bearer token from the Brain prompt): ").strip()
-    try:
-        http_json("GET", cfg["relay_url"] + "/api/v1/time", headers={"Authorization": f"Bearer {cfg['brain_token']}"},
-                  timeout=70)
-    except urllib.error.HTTPError as e:
-        raise SystemExit(f"The relay refused that token ({e.code}). Run setup again with the right one.")
-
-    cfg.update(llama_server=str(install_llama_cpp(gpu["cuda"])), model=str(install_model(quant)),
-               quant=quant, ctx=ctx, gpu=gpu["name"])
-    cfg.setdefault("api_key", "qwk_" + secrets.token_urlsafe(24))
-    cfg.setdefault("llama_key", secrets.token_urlsafe(24))
-    cfg.setdefault("api_host", "127.0.0.1")
-    cfg.setdefault("think", True)
+    cfg.setdefault("relay_url", args.relay_url or DEFAULT_RELAY)
+    while True:
+        if not cfg.get("brain_token") or args.command == "setup":
+            cfg["brain_token"] = getpass.getpass("Brain API token (the Bearer token from the Brain prompt): ").strip()
+        try:
+            http_json("GET", cfg["relay_url"] + "/api/v1/time",
+                      headers={"Authorization": f"Bearer {cfg['brain_token']}"}, timeout=70)
+            break
+        except urllib.error.HTTPError as e:
+            print(f"The relay refused that token ({e.code}). Try again.")
+            cfg["brain_token"] = ""
+    cfg["source_script"] = str(Path(__file__).resolve())
     save_json(CONFIG, cfg)
-    if Path(__file__).resolve() != (BASE / "qwen_brain.py").resolve():
-        shutil.copy2(__file__, BASE / "qwen_brain.py")   # autostart runs this copy, on D:
-    install_autostart()
+    ok, rep = selfcheck(cfg)
+    print("\n" + "\n".join(rep))
+    if not ok:
+        raise SystemExit("\nSetup is not complete; fix the FIXME lines above and run it again.")
     print(f"\nInstalled in {BASE}\n  OpenAI API: http://127.0.0.1:{API_PORT}/v1   key: {cfg['api_key']}   model: qwen\n")
 
 
 # ------------------------------------------------------------------ llama-server supervisor
 class Llama:
+    """llama-server on demand: loaded at boot, unloaded from the GPU after `idle_unload_min` minutes with nothing
+    to do, loaded again the moment a chat message or an API call needs it. Restarted if it crashes."""
+
     def __init__(self, cfg: dict):
-        self.cfg, self.proc, self.ready = cfg, None, threading.Event()
+        self.cfg, self.proc = cfg, None
+        self.ready, self.wanted = threading.Event(), threading.Event()
+        self.lock, self.users, self.last_used = threading.Lock(), 0, time.time()
+        self.state = "starting"
         self.url = f"http://127.0.0.1:{LLAMA_PORT}"
+        self.wanted.set()                          # load everything at boot
 
     def _cmd(self):
         c = self.cfg
-        return [c["llama_server"], "-m", c["model"], "--host", "127.0.0.1", "--port", str(LLAMA_PORT),
-                "--api-key", c["llama_key"], "-ngl", "999", "-c", str(c["ctx"]), "--jinja",
-                "--alias", "qwen", "-np", "1", *c.get("extra_args", [])]
+        cmd = [c["llama_server"], "-m", c["model"], "--host", "127.0.0.1", "--port", str(LLAMA_PORT),
+               "--api-key", c["llama_key"], "-ngl", "999", "-c", str(c["ctx"]), "--jinja",
+               "--alias", "qwen", "-np", "1"]
+        if c.get("fits_gpu", True):
+            cmd.append("--no-mmap")                # stream weights straight to VRAM: a few GB of RAM is enough
+        return cmd + c.get("extra_args", [])
+
+    @contextmanager
+    def use(self, timeout: float = 900):
+        """Hold the model loaded while a job runs; wakes it up if it was unloaded."""
+        with self.lock:
+            self.users += 1
+            self.last_used = time.time()
+        self.wanted.set()
+        try:
+            if not self.ready.wait(timeout):
+                raise RuntimeError(f"the model did not load within {int(timeout)}s (see logs/llama-server.log)")
+            yield
+        finally:
+            with self.lock:
+                self.users -= 1
+                self.last_used = time.time()
 
     def _kill_strays(self):
         """A llama-server left over from a crash would hold the port."""
@@ -286,45 +414,75 @@ class Llama:
                            capture_output=True, timeout=30)
             time.sleep(2)
 
+    def _smoke_test(self) -> bool:
+        """Health 200 is not enough: ask for a real answer once per load."""
+        try:
+            r = http_json("POST", self.url + "/v1/chat/completions", {
+                "model": "qwen", "max_tokens": 8, "messages": [{"role": "user", "content": "Reply with: OK"}],
+                "chat_template_kwargs": {"enable_thinking": False}},
+                {"Authorization": f"Bearer {self.cfg['llama_key']}"}, timeout=120)
+            return bool(r["choices"][0]["message"].get("content") is not None)
+        except Exception as e:  # noqa: BLE001
+            log.error("smoke test failed: %s", e)
+            return False
+
     def supervise(self, stop: threading.Event):
         backoff = 5
+        idle_s = float(self.cfg.get("idle_unload_min", 30)) * 60
         while not stop.is_set():
+            if not self.wanted.wait(1):
+                continue                           # asleep: GPU free, waiting for work
             self._kill_strays()
             self.ready.clear()
+            self.state = "loading"
             out = open(LOGS / "llama-server.log", "ab")
-            log.info("starting llama-server (%s, ctx %s)", Path(self.cfg["model"]).name, self.cfg["ctx"])
+            log.info("loading %s onto the GPU (ctx %s)", Path(self.cfg["model"]).name, self.cfg["ctx"])
             self.proc = subprocess.Popen(self._cmd(), stdout=out, stderr=subprocess.STDOUT,
                                          creationflags=0x08000000 if IS_WIN else 0)   # CREATE_NO_WINDOW
-            started = time.time()
+            started, unloaded = time.time(), False
             while self.proc.poll() is None and not stop.is_set():
                 if not self.ready.is_set():
                     try:
                         urllib.request.urlopen(self.url + "/health", timeout=3)
+                        if not self._smoke_test():
+                            self.proc.terminate()
+                            break
                         self.ready.set()
-                        backoff = 5
-                        log.info("model loaded on GPU in %ds", time.time() - started)
-                    except Exception:  # noqa: BLE001  (503 while loading)
-                        pass
+                        self.state, backoff = "loaded", 5
+                        with self.lock:
+                            self.last_used = max(self.last_used, time.time())
+                        log.info("model loaded and answering, in %ds", time.time() - started)
+                    except urllib.error.URLError:
+                        pass                       # still loading (503) or not listening yet
+                elif idle_s and self.users == 0 and time.time() - self.last_used > idle_s:
+                    log.info("idle for %d min: unloading the model (it reloads on the next message)", idle_s // 60)
+                    self.ready.clear()
+                    self.wanted.clear()
+                    self.proc.terminate()
+                    self.proc.wait(30)
+                    self.state, unloaded = "sleeping", True
+                    break
                 time.sleep(2)
             out.close()
-            if stop.is_set():
-                break
-            log.error("llama-server exited with %s; restart in %ds (see logs/llama-server.log)",
+            if stop.is_set() or unloaded:
+                continue
+            log.error("llama-server stopped (exit %s); restart in %ds (see logs/llama-server.log)",
                       self.proc.returncode, backoff)
             self.ready.clear()
+            self.state = "restarting"
             stop.wait(backoff)
             backoff = min(backoff * 2, 300)
         if self.proc and self.proc.poll() is None:
             self.proc.terminate()
 
     def chat(self, messages: list, tools: list | None = None, timeout: float = 900) -> dict:
-        self.ready.wait()
         body = {"model": "qwen", "messages": messages, "temperature": 0.6, "top_p": 0.95,
                 "chat_template_kwargs": {"enable_thinking": bool(self.cfg.get("think", True))}}
         if tools:
             body["tools"] = tools
-        r = http_json("POST", self.url + "/v1/chat/completions", body,
-                      {"Authorization": f"Bearer {self.cfg['llama_key']}"}, timeout=timeout)
+        with self.use():
+            r = http_json("POST", self.url + "/v1/chat/completions", body,
+                          {"Authorization": f"Bearer {self.cfg['llama_key']}"}, timeout=timeout)
         return r["choices"][0]["message"]
 
 
@@ -353,6 +511,7 @@ def make_api(cfg: dict, llama: Llama, brain: "RelayBrain"):
         def do_GET(self):
             if self.path.rstrip("/") in ("/v1/health", "/health"):
                 return self._send(200, {"ok": True, "service": "qwen-brain", "model_loaded": llama.ready.is_set(),
+                                        "model_state": llama.state,
                                         "model": Path(cfg["model"]).name, "agent": brain.name,
                                         "agent_id": brain.agent_id, "relay_ok": brain.relay_ok})
             if not self._authed():
@@ -367,8 +526,6 @@ def make_api(cfg: dict, llama: Llama, brain: "RelayBrain"):
                 return
             if not self.path.startswith("/v1/"):
                 return self._send(404, {"error": {"message": "not found"}})
-            if not llama.ready.wait(timeout=1):
-                return self._send(503, {"error": {"message": "model is still loading, retry shortly"}})
             body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
             try:
                 j = json.loads(body or b"{}")
@@ -376,6 +533,13 @@ def make_api(cfg: dict, llama: Llama, brain: "RelayBrain"):
                 body = json.dumps(j).encode()
             except ValueError:
                 return self._send(400, {"error": {"message": "body must be JSON"}})
+            try:
+                with llama.use():                  # wakes the model up if it was unloaded
+                    self._proxy(body)
+            except RuntimeError as e:
+                self._send(503, {"error": {"message": str(e)}})
+
+        def _proxy(self, body: bytes):
             req = urllib.request.Request(llama.url + self.path, data=body, method="POST", headers={
                 "Content-Type": "application/json", "Authorization": f"Bearer {cfg['llama_key']}"})
             try:
@@ -542,7 +706,7 @@ class RelayBrain:
     # -- threads
     def listen(self, stop: threading.Event):
         """Long-poll the inbox non-stop: keeps this agent 'online' and queues messages, even while it is busy."""
-        announced, last_hello = False, 0.0
+        last_hello, online = 0.0, False
         while not stop.is_set():
             try:
                 if time.time() - last_hello > 600 or not self.agent_id:
@@ -553,13 +717,13 @@ class RelayBrain:
                     if not self.device_id:
                         stop.wait(30)
                         continue
-                if not announced and self.llama.ready.is_set():
-                    self.say("app", f"Hi, I'm {self.name}: Qwen3.6-27B running on this laptop's GPU. "
-                                    f"Call me with @{self.name.lower()}.")
-                    log.info("online as %s (%s), device %s", self.name, self.agent_id, self.device_id)
-                    announced = True
+                if not online:                     # reconnects silently: no chat message, no idle work
+                    log.info("connected to the relay as %s (%s), device %s", self.name, self.agent_id, self.device_id)
+                    online = True
+                # The "notification": one open request that the relay answers the instant a message for us arrives
+                # (or after 25 s with nothing, then it is re-opened). Costs no model time and almost no data.
                 r = self.call("GET", "/api/v1/messages", params={
-                    "device_id": self.device_id, "agent_id": self.agent_id, "wait": 10})
+                    "device_id": self.device_id, "agent_id": self.agent_id, "wait": 25})
                 for m in r.get("messages", []):
                     with open(STATE / "inbox.jsonl", "a", encoding="utf-8") as f:
                         f.write(json.dumps(m) + "\n")     # on disk before anything else
@@ -569,11 +733,13 @@ class RelayBrain:
                     self.inbox.put(m)
             except urllib.error.HTTPError as e:
                 log.warning("relay %s: %s", e.code, e.read()[:300])
+                online = False
                 if e.code == 404:
                     self.device_id = None
                 stop.wait(10)
             except Exception as e:  # noqa: BLE001
                 log.warning("relay unreachable: %s", e)
+                online = False
                 stop.wait(10)
 
     def work(self, stop: threading.Event):
@@ -707,13 +873,17 @@ def slim(t: dict) -> dict:
 
 # ------------------------------------------------------------------ commands
 def run(_args=None):
-    cfg = load_cfg()
-    if not cfg.get("model"):
-        raise SystemExit("Not set up yet: run `python qwen_brain.py` first.")
     STATE.mkdir(parents=True, exist_ok=True)
     if port_open(API_PORT):
         raise SystemExit(f"Port {API_PORT} is busy: Qwen Brain is probably already running "
                          f"(check http://127.0.0.1:{API_PORT}/v1/health).")
+    while True:                                    # double-check (and repair) everything before every start
+        cfg = load_cfg()
+        ok, _ = selfcheck(cfg)
+        if ok:
+            break
+        log.warning("not everything is in place yet; checking again in 60 s")
+        time.sleep(60)
     stop = threading.Event()
     llama = Llama(cfg)
     brain = RelayBrain(cfg, llama)
@@ -757,6 +927,12 @@ def start_background():
     print(f"Not loaded after 10 minutes: see {LOGS / 'llama-server.log'}")
 
 
+def check(_args=None):
+    ok, rep = selfcheck(load_cfg())
+    print("\n".join(rep))
+    status()
+
+
 def status(_args=None):
     cfg = load_cfg()
     try:
@@ -779,15 +955,14 @@ def stop_cmd(_args=None):
 
 
 def uninstall(_args=None):
-    if IS_WIN:
-        vbs = Path(os.environ["APPDATA"]) / r"Microsoft\Windows\Start Menu\Programs\Startup\QwenBrain.vbs"
-        vbs.unlink(missing_ok=True)
+    if startup_file():
+        startup_file().unlink(missing_ok=True)
     print(f"autostart removed; files are still in {BASE} (delete the folder to free the space)")
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("command", nargs="?", default="auto", choices=["auto", "setup", "run", "status", "stop", "uninstall"])
+    p.add_argument("command", nargs="?", default="auto", choices=["auto", "setup", "run", "check", "status", "stop", "uninstall"])
     p.add_argument("--relay-url", default=None)
     p.add_argument("--quant", default=None, help="override the auto choice, e.g. Q4_K_M, Q5_K_M, Q6_K, Q8_0")
     p.add_argument("--ctx", type=int, default=None, help="context length with --quant")
@@ -795,14 +970,14 @@ def main():
     background = args.command == "run" and (sys.stdout is None or Path(sys.executable).stem.lower() == "pythonw")
     setup_logging(console=not background)
     if args.command in ("auto", "setup"):
-        if args.command == "setup" or not load_cfg().get("model"):
+        if args.command == "setup" or not load_cfg().get("model_size"):
             setup(args)
         if args.command == "auto":
             if not port_open(API_PORT):
                 start_background()
             status()
         return
-    {"run": run, "status": status, "stop": stop_cmd, "uninstall": uninstall}[args.command](args)
+    {"run": run, "check": check, "status": status, "stop": stop_cmd, "uninstall": uninstall}[args.command](args)
 
 
 if __name__ == "__main__":
