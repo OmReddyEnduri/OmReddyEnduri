@@ -18,9 +18,9 @@ What it does
      After `idle_unload_min` (default 30) minutes with nothing to do it unloads the model to free the GPU, and loads
      it again by itself the moment a message or API call needs it. Restarted if it crashes.
   4. Serves an OpenAI-compatible API on http://127.0.0.1:8766/v1 with its own `qwk_...` key (model "qwen").
-  5. Joins the Render relay team as "Qwen" (@qwen), silently, and keeps that name across reboots. No idle work and
+  5. Joins the Render relay team as "asdf" (@asdf; change with --name), silently, and keeps that name across reboots. No idle work and
      no heartbeat chatter: one open long-poll to the relay is its notification, and the relay answers it the instant
-     a message for Qwen arrives. Only then does the model wake up and work.
+     a message for it arrives. Only then does the model wake up and work.
   6. Puts a hidden launcher in your Startup folder, so all of this starts by itself every time you log in.
 """
 from __future__ import annotations
@@ -349,7 +349,9 @@ def setup(args):
         raise SystemExit(f"Need about 30 GB free on {BASE.anchor}, have {human(free)}.")
     cfg.setdefault("relay_url", args.relay_url or DEFAULT_RELAY)
     while True:
-        if not cfg.get("brain_token") or args.command == "setup":
+        if args.token:
+            cfg["brain_token"], args.token = args.token.strip(), None
+        elif not cfg.get("brain_token") or args.command == "setup":
             cfg["brain_token"] = getpass.getpass("Brain API token (the Bearer token from the Brain prompt): ").strip()
         try:
             http_json("GET", cfg["relay_url"] + "/api/v1/time",
@@ -358,6 +360,8 @@ def setup(args):
         except urllib.error.HTTPError as e:
             print(f"The relay refused that token ({e.code}). Try again.")
             cfg["brain_token"] = ""
+        except (urllib.error.URLError, OSError) as e:
+            raise SystemExit(f"Cannot reach the relay at {cfg['relay_url']} ({e}). Check the internet and run again.")
     cfg["source_script"] = str(Path(__file__).resolve())
     save_json(CONFIG, cfg)
     ok, rep = selfcheck(cfg)
@@ -628,6 +632,10 @@ TOOLS = [
 ]
 
 
+def slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9_.-]", "", name.lower())[:60] or "agent"
+
+
 class Stopped(Exception):
     pass
 
@@ -638,6 +646,9 @@ class RelayBrain:
         self.base, self.token = cfg.get("relay_url", DEFAULT_RELAY).rstrip("/"), cfg["brain_token"]
         st = json.loads((STATE / "agent.json").read_text("utf-8")) if (STATE / "agent.json").exists() else {}
         self.agent_id, self.name, self.device_id = st.get("agent_id"), st.get("name"), st.get("device_id")
+        self.want_name = cfg.get("agent_name") or "asdf"
+        if self.agent_id and self.agent_id != slug(self.want_name) and not self.agent_id.startswith(slug(self.want_name)):
+            self.agent_id = self.name = None       # the name was changed in config: register under the new one
         self.inbox: queue.Queue = queue.Queue()
         self.cancel = threading.Event()
         self.relay_ok = False
@@ -665,9 +676,9 @@ class RelayBrain:
     def hello(self):
         info = {"kind": "local-gpu", "model": Path(self.cfg["model"]).name, "host": socket.gethostname()}
         # Its own identity (not `{}`, which would reuse an offline LLM Arena agent's name such as Atlas). The relay
-        # names it "Qwen" (or "Qwen2" if taken); the saved agent_id keeps that name across reboots.
-        r = self.call("POST", "/api/v1/agents/hello", {"agent_id": self.agent_id or "qwen-local", "name": "Qwen",
-                                                       "info": info})
+        # gives it the configured name (or name2 if taken); the saved agent_id keeps that name across reboots.
+        r = self.call("POST", "/api/v1/agents/hello", {"agent_id": self.agent_id or slug(self.want_name),
+                                                       "name": self.want_name, "info": info})
         new = r["name"] != self.name
         self.agent_id, self.name = r["agent_id"], r["name"]
         self._save_state()
@@ -678,9 +689,8 @@ class RelayBrain:
         if self.device_id in {d["device_id"] for d in devs}:
             return
         on = [d for d in devs if d.get("online")] or devs
-        if on:
-            self.device_id = on[0]["device_id"]
-            self._save_state()
+        self.device_id = on[0]["device_id"] if on else None
+        self._save_state()
 
     def say(self, channel: str, text: str, kind: str = "msg"):
         self.call("POST", "/api/v1/messages", {"device_id": self.device_id, "agent_id": self.agent_id,
@@ -712,8 +722,8 @@ class RelayBrain:
                 if time.time() - last_hello > 600 or not self.agent_id:
                     self.hello()
                     last_hello = time.time()
-                if not self.device_id:
-                    self.find_device()
+                if not self.device_id or not online:
+                    self.find_device()             # re-checks a saved laptop id against the relay every (re)connect
                     if not self.device_id:
                         stop.wait(30)
                         continue
@@ -916,13 +926,19 @@ def start_background():
     else:
         subprocess.Popen([sys.executable, str(script), "run"], start_new_session=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print("Starting in the background; loading 20+ GB onto the GPU takes a minute or two...")
-    for _ in range(600):
+    print("Starting in the background (hidden); loading 20+ GB onto the GPU takes a minute or two...")
+    t0, h = time.time(), {}
+    for i in range(600):
         try:
-            if http_json("GET", f"http://127.0.0.1:{API_PORT}/v1/health", timeout=3).get("model_loaded"):
+            h = http_json("GET", f"http://127.0.0.1:{API_PORT}/v1/health", timeout=3)
+            if h.get("model_loaded") and h.get("agent"):
+                print(f"\r  ready after {time.time() - t0:.0f}s: model loaded, connected to the relay as "
+                      f"{h['agent']}                    ")
                 return
         except Exception:  # noqa: BLE001
             pass
+        print(f"\r  {time.time() - t0:4.0f}s  model: {h.get('model_state', 'starting')}  "
+              f"relay: {h.get('agent') or 'connecting'}   ", end="", flush=True)
         time.sleep(1)
     print(f"Not loaded after 10 minutes: see {LOGS / 'llama-server.log'}")
 
@@ -966,13 +982,29 @@ def main():
     p.add_argument("--relay-url", default=None)
     p.add_argument("--quant", default=None, help="override the auto choice, e.g. Q4_K_M, Q5_K_M, Q6_K, Q8_0")
     p.add_argument("--ctx", type=int, default=None, help="context length with --quant")
+    p.add_argument("--token", default=None, help="the relay Brain API token (skips the question)")
+    p.add_argument("--name", default=None, help="the agent's name in the team (default: asdf)")
     args = p.parse_args()
     background = args.command == "run" and (sys.stdout is None or Path(sys.executable).stem.lower() == "pythonw")
     setup_logging(console=not background)
     if args.command in ("auto", "setup"):
-        if args.command == "setup" or not load_cfg().get("model_size"):
-            setup(args)
+        BASE.mkdir(parents=True, exist_ok=True)
+        cfg, changed = load_cfg(), False
+        for key, val in (("agent_name", args.name), ("brain_token", args.token)):
+            if val and cfg.get(key) != val.strip():
+                cfg[key], changed = val.strip(), True
+        if changed:
+            save_json(CONFIG, cfg)
+        print(f"== Qwen Brain: {BASE} ==")
+        setup(args)                                # every step is checked; finished steps are skipped
         if args.command == "auto":
+            if port_open(API_PORT) and changed:
+                print("restarting the running copy with the new settings...")
+                stop_cmd()
+                for _ in range(30):
+                    if not port_open(API_PORT):
+                        break
+                    time.sleep(1)
             if not port_open(API_PORT):
                 start_background()
             status()
