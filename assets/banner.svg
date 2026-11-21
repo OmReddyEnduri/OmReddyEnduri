@@ -1,0 +1,162 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 280" width="100%" height="280">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#080B11"/>
+      <stop offset="40%" stop-color="#0D1117"/>
+      <stop offset="80%" stop-color="#141B2D"/>
+      <stop offset="100%" stop-color="#1A102F"/>
+    </linearGradient>
+
+    <!-- Vibrant Accent Gradient -->
+    <linearGradient id="accent-grad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00F0FF">
+        <animate attributeName="stop-color" values="#00F0FF;#8A2BE2;#FF007F;#00F0FF" dur="8s" repeatCount="indefinite"/>
+      </stop>
+      <stop offset="50%" stop-color="#8A2BE2">
+        <animate attributeName="stop-color" values="#8A2BE2;#FF007F;#00F0FF;#8A2BE2" dur="8s" repeatCount="indefinite"/>
+      </stop>
+      <stop offset="100%" stop-color="#FF007F">
+        <animate attributeName="stop-color" values="#FF007F;#00F0FF;#8A2BE2;#FF007F" dur="8s" repeatCount="indefinite"/>
+      </stop>
+    </linearGradient>
+
+    <!-- Wave 1 Gradient -->
+    <linearGradient id="wave1-grad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#1F6FEB" stop-opacity="0.35"/>
+      <stop offset="50%" stop-color="#8A2BE2" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="#FF007F" stop-opacity="0.25"/>
+    </linearGradient>
+
+    <!-- Wave 2 Gradient -->
+    <linearGradient id="wave2-grad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00F0FF" stop-opacity="0.4"/>
+      <stop offset="50%" stop-color="#1F6FEB" stop-opacity="0.5"/>
+      <stop offset="100%" stop-color="#8A2BE2" stop-opacity="0.3"/>
+    </linearGradient>
+
+    <!-- Glow Filter -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <filter id="subtle-glow">
+      <feGaussianBlur stdDeviation="3" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <!-- Pattern -->
+    <pattern id="grid" width="30" height="30" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1" fill="rgba(255, 255, 255, 0.08)" />
+      <path d="M 30 0 L 0 0 0 30" fill="none" stroke="rgba(255, 255, 255, 0.02)" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <style>
+    .title-text {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      font-weight: 900;
+      font-size: 58px;
+      letter-spacing: 4px;
+      fill: #FFFFFF;
+    }
+    .badge-text {
+      font-family: 'JetBrains Mono', Consolas, Monaco, monospace;
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: 2px;
+      fill: #00F0FF;
+    }
+    .subtitle-text {
+      font-family: 'JetBrains Mono', -apple-system, Consolas, monospace;
+      font-weight: 600;
+      font-size: 16px;
+      letter-spacing: 2.5px;
+      fill: #C9D1D9;
+    }
+    .status-text {
+      font-family: 'JetBrains Mono', Consolas, monospace;
+      font-weight: 600;
+      font-size: 11px;
+      letter-spacing: 1.5px;
+      fill: #7EE787;
+    }
+    @keyframes pulseGlow {
+      0%, 100% { opacity: 0.85; transform: scale(1); }
+      50% { opacity: 1; transform: scale(1.01); }
+    }
+    @keyframes waveMove {
+      0% { transform: translateX(0); }
+      50% { transform: translateX(-40px); }
+      100% { transform: translateX(0); }
+    }
+    .wave-anim-1 {
+      animation: waveMove 10s ease-in-out infinite;
+    }
+    .wave-anim-2 {
+      animation: waveMove 7s ease-in-out infinite reverse;
+    }
+  </style>
+
+  <!-- Container Box -->
+  <rect width="1200" height="280" rx="16" fill="url(#bg-grad)"/>
+  <rect width="1200" height="280" rx="16" fill="url(#grid)"/>
+
+  <!-- Border Accent -->
+  <rect width="1198" height="278" x="1" y="1" rx="15" fill="none" stroke="url(#accent-grad)" stroke-width="2" opacity="0.6"/>
+
+  <!-- Dynamic Waving Paths at Bottom -->
+  <g class="wave-anim-1">
+    <path d="M-100,220 C150,170 350,260 600,210 C850,160 1050,250 1300,200 L1300,280 L-100,280 Z" fill="url(#wave1-grad)"/>
+  </g>
+  <g class="wave-anim-2">
+    <path d="M-50,230 C200,270 450,180 700,235 C950,280 1150,190 1350,230 L1350,280 L-50,280 Z" fill="url(#wave2-grad)"/>
+  </g>
+
+  <!-- Glowing Accent Light Bar -->
+  <line x1="80" y1="2" x2="1120" y2="2" stroke="url(#accent-grad)" stroke-width="3" filter="url(#glow)"/>
+
+  <!-- System Status Pill -->
+  <g transform="translate(60, 42)">
+    <rect width="210" height="28" rx="14" fill="rgba(13, 17, 23, 0.85)" stroke="rgba(56, 139, 253, 0.4)" stroke-width="1"/>
+    <circle cx="16" cy="14" r="4.5" fill="#3FB950">
+      <animate attributeName="opacity" values="1;0.4;1" dur="2s" repeatCount="indefinite"/>
+    </circle>
+    <text x="30" y="18" class="status-text">SYSTEMS ARCHITECT</text>
+  </g>
+
+  <!-- Top Right Badges -->
+  <g transform="translate(930, 42)">
+    <rect width="210" height="28" rx="14" fill="rgba(13, 17, 23, 0.85)" stroke="rgba(255, 0, 127, 0.4)" stroke-width="1"/>
+    <circle cx="16" cy="14" r="4.5" fill="#FF007F"/>
+    <text x="30" y="18" class="badge-text" fill="#FF007F">ALGOCORE // ACTIVE</text>
+  </g>
+
+  <!-- Center Main Title -->
+  <g transform="translate(600, 125)">
+    <!-- Shadow / Glow behind title -->
+    <text x="0" y="0" text-anchor="middle" class="title-text" fill="#00F0FF" filter="url(#glow)" opacity="0.6">OM REDDY ENDURI</text>
+    <!-- Crisp Foreground Title -->
+    <text x="0" y="0" text-anchor="middle" class="title-text">OM REDDY ENDURI</text>
+  </g>
+
+  <!-- Subtitle / Track Record -->
+  <g transform="translate(600, 168)">
+    <text x="0" y="0" text-anchor="middle" class="subtitle-text">
+      USACO GOLD  <tspan fill="#8A2BE2">|</tspan>  3X INOI FINALIST  <tspan fill="#8A2BE2">|</tspan>  SYSTEMS &amp; ALGORITHM ENGINEER
+    </text>
+  </g>
+
+  <!-- Decorative Corner Accents -->
+  <path d="M 20 50 L 20 20 L 50 20" fill="none" stroke="#00F0FF" stroke-width="2" opacity="0.7"/>
+  <path d="M 1180 50 L 1180 20 L 1150 20" fill="none" stroke="#FF007F" stroke-width="2" opacity="0.7"/>
+  <path d="M 20 230 L 20 260 L 50 260" fill="none" stroke="#8A2BE2" stroke-width="2" opacity="0.7"/>
+  <path d="M 1180 230 L 1180 260 L 1150 260" fill="none" stroke="#00F0FF" stroke-width="2" opacity="0.7"/>
+</svg>

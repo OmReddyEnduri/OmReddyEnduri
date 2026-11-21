@@ -7,7 +7,7 @@
 <div align="center">
 
 <a href="https://github.com/OmReddyEnduri">
-  <img width="100%" src="https://capsule-render.vercel.app/api?type=waving&height=230&color=0:0D1117,45:161B22,100:8A2BE2&text=OM%20REDDY%20ENDURI&fontColor=F0F6FC&fontSize=56&fontAlignY=38&desc=USACO%20GOLD%20%7C%203X%20INOI%20FINALIST%20%7C%20SYSTEMS%20%26%20ALGORITHM%20ENGINEER&descAlignY=58&descSize=17&animation=fadeIn" alt="Om Reddy Enduri Banner" />
+  <img width="100%" src="https://raw.githubusercontent.com/OmReddyEnduri/OmReddyEnduri/main/assets/banner.svg" alt="Om Reddy Enduri Banner" />
 </a>
 
 <a href="https://readme-typing-svg.demolab.com">
@@ -512,7 +512,7 @@ SnippetVault is a lightning-fast developer shelf for your terminal, storing and 
 
 <div align="center">
 
-<img width="100%" src="https://capsule-render.vercel.app/api?type=waving&height=130&section=footer&color=0:8A2BE2,55:161B22,100:0D1117&animation=fadeIn" alt="Footer Banner" />
+<img width="100%" src="https://raw.githubusercontent.com/OmReddyEnduri/OmReddyEnduri/main/assets/footer.svg" alt="Footer Banner" />
 
 ### `while (curious) { learn(); build(); solve(); repeat(); }`
 
