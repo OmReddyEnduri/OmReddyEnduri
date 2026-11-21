@@ -432,10 +432,6 @@ SnippetVault is a lightning-fast developer shelf for your terminal, storing and 
 
 <div align="center">
 
-<img src="https://github-profile-trophy.vercel.app/?username=OmReddyEnduri&theme=darkhub&no-frame=true&no-bg=true&margin-w=8&row=1&column=7" alt="GitHub profile trophies" />
-
-<br/><br/>
-
 <img width="49%" src="https://github-readme-stats.vercel.app/api?username=OmReddyEnduri&show_icons=true&hide_border=true&theme=tokyonight&rank_icon=github&include_all_commits=true" alt="GitHub statistics" />
 <img width="49%" src="https://github-readme-stats.vercel.app/api/top-langs/?username=OmReddyEnduri&layout=compact&hide_border=true&theme=tokyonight&langs_count=10" alt="Top Languages" />
 
